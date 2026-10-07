@@ -2,6 +2,8 @@
 
 此索引覆盖公开仓库中的全部 20 份 JSON 模板：1 份 AstrBot 命令/基础配置模板 + 19 份插件配置模板。21 个插件里，林小满个人接口不需要独立配置，AstrBot 内置命令扩展沿用 AstrBot 全局配置；其余涉及配置的组件均有对应模板。安装器只在目标文件不存在时复制，不会覆盖已有配置。对已有实例运行安装器时，请先备份并自行比对差异。
 
+已对照当前 WSL 实例的插件目录、版本元数据和 JSON 字段结构核查：21 个插件目录与 [`plugin-lock.md`](plugin-lock.md) 中的插件对应；现有模板保留可复用设置，同时省略账号/群管理员 ID、Cookie/Token、私有路径和 Provider 实例 ID。MusicDL 的 11 个 Cookie 项以空值列出，安全插件白名单开关保留为关闭。AstrBot 全局配置中的管理员 ID 和 Airi 管理员列表不会公开。
+
 模板不是可直接登录运行的原机镜像。为公开分享，API 密钥、Cookie、令牌、账号/群号、管理员和白名单、真实端点/路径已清空或替换；插件的数据目录、数据库、定时任务和图库状态不在这些 JSON 中。首次部署建议让对应插件版本生成默认配置，再参考模板恢复非敏感设置。
 
 ## 全局模板
@@ -45,3 +47,5 @@
 ## 不在 JSON 模板中的状态
 
 以下不是“配置丢失”，而是有意不公开：AstrBot 数据库和 Provider/平台登录凭据，`plugin_data/` 中的对话记忆/好感度/学习结果、表情包图库与标签、Life Scheduler 今日状态、Scheduled Sender 任务状态、Airi 在线/同步凭据、下载缓存和日志。若要迁移自己的这些状态，请加密备份本机 `AstrBot/data/`，不要提交到公开 GitHub。参见 [`restore-and-backup.md`](restore-and-backup.md)。
+
+当前 WSL `config/` 目录还留有 Living Memory、Local Reminiscence、Meme Manager、Stealer 等历史配置文件，但对应插件目录不在当前安装列表中；另有一个旧 `meme_manager` 配置文件。它们按残留/未启用配置处理，不算当前林小满机制，也未复制到公开模板。重新安装这些插件前，应先单独确认用途、数据来源和权限。

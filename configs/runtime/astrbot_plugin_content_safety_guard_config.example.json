@@ -17,7 +17,9 @@
     ],
     "regex_rules": []
   },
-  "whitelist": {},
+  "whitelist": {
+    "enable": false
+  },
   "llm_audit": {
     "enable": true,
     "mode": "separate",
