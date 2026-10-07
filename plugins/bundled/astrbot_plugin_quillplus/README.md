@@ -1,0 +1,422 @@
+# QuillPlus (羽笔) - 多维沉浸式 RP 增强插件
+
+> 世界书 + 写作素材库 + 角色卡 + 文档 RAG + 动态记忆 + 状态栏，六合一沉浸式 RP 增强插件。
+
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![AstrBot Plugin](https://img.shields.io/badge/AstrBot-Plugin-indigo.svg)](https://github.com/AstrBotDevs/AstrBot)
+[![Version](https://img.shields.io/badge/version-5.3.1-green.svg)]()
+[![License](https://img.shields.io/badge/license-AGPL--3.0-orange.svg)](./LICENSE)
+[![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.26.0-purple.svg)]()
+
+---
+
+## 简介
+
+QuillPlus 是一个面向 AstrBot 的沉浸式角色扮演（RP）增强插件。它通过世界书、写作素材库、角色卡、文档 RAG、动态记忆和状态栏六个模块的联动，为 LLM 驱动的角色提供结构化记忆、上下文注入和状态追踪能力。
+
+支持通过聊天指令（手机端可用）和 Web 管理面板两种方式进行交互。
+
+---
+
+## 特性
+
+### 角色卡系统 (Character Card V2)
+
+完整实现 Character Card V2 标准，兼容多种导入来源。
+
+- 支持 PNG / JPG / WebP / JSON 格式的 V2 卡片导入，导出为 PNG（含头像）或 JSON
+- 内置正则解析引擎，支持 W++、Raw Text 等纯文本格式导入
+- 头像不随列表内联返回，按需懒加载（Data URL / 静态端点），避免 WebUI iframe 沙箱的跨域限制
+- 支持从 Character.AI / Chub 等平台导入卡片
+- **头像自定义裁剪**：Web 面板内置裁剪器，支持拖拽移动 + 滚轮缩放，Canvas 生成 300×300 方形 PNG
+
+### 世界书系统 (Worldbook)
+
+关键词触发的设定条目管理，prompt 按需注入。
+
+- 常驻条目全局注入，构建稳定基调设定
+- 关键词模糊匹配 + 灵敏度调节，命中时注入对应条目
+- 支持注入到用户消息之前（前置模式）
+- 每个角色可绑定专属世界书集合，角色切换时自动挂载/卸载
+
+### 写作素材库 (Writing Resource)
+
+145+ 条预设写作指引，覆盖用词、节奏、描写、动作等维度。
+
+- SQLite + FTS5 全文检索，关键词毫秒级命中
+- 四层 Prompt 装配（协议层 → 素材层 → 触发层 → 安全层），自动截断
+- 不同角色可绑定不同分类，避免设定串扰
+- 反拒绝协议：检测 LLM 拒绝行为后注入应急提示
+
+### 文档知识库 (Doc RAG)
+
+上传外部文档，AI 检索后注入 prompt。
+
+- 支持 .txt / .md 等纯文本格式（PDF / Office 等二进制格式不支持）
+- 段落优先分块 + 固定长度兜底，overlap 保持上下文连贯
+- 支持 API Embedding（如 SiliconFlow）和本地模型 fallback
+- 独立 Rerank Provider 提升检索精度
+
+### 动态记忆 (Vector Memory)
+
+自动摘要对话内容，向量化存储后跨会话检索注入。
+
+- 通过 `event.unified_msg_origin` 天然隔离不同会话
+- 调用 LLM 将对话精炼为短文本并生成向量
+- SQLite BLOB 存储向量 + NumPy 余弦相似度检索
+- **核心记忆锚定**：可将关键记忆钉住（`is_core=1`），不参与 Top-K 竞争，无条件注入 `<core_memory>` XML 标签，类似人设基石
+- **核心记忆自然语言注入**：在对话中通过 `@记住：...` 指令直接写入核心记忆，无需进入面板操作
+- **全自动闲时反思**：系统空闲时自动分析未提纯的记忆，总结核心特质与关键事实，迭代角色深层设定
+- **混合检索**：FTS5 (BM25) + Vector 混合检索，RRF 融合 + Ebbinghaus 时间衰减过滤
+- **LRU 会话缓存**：加速同会话反复检索，减少磁盘与序列化开销
+- 聊天指令管理：`/memory list/del/clear/learn/search/pin`
+
+### 状态栏系统 (Status Bar)
+
+追踪角色与用户的交互状态，将 LLM 输出结构化为可读面板。
+
+- 6 级降级解析（code block / LOVE_DATA / STATUS / raw / lenient / LLM 提取）确保格式兼容，逐级命中率可在 /quill debug 查看
+- 工具调用与响应两路钩子协作，避免重复注入
+- 关闭状态栏后自动剥离残留格式（关闭时也会清除历史上下文里已渲染的状态栏，避免边禁边示范）
+- 字段名可自定义，支持分支剧情选项生成；改字段名会同步影响提示词契约、剥离器与解析器
+- **格式契约单一来源**：字段行/示例/选项块统一由 `build_status_contract()` 生成，改一处全链路跟随
+- **平台双模板**：QQ/微信等不渲染 Markdown 的平台自动改用分隔线模板，避免 `**状态栏**` 与围栏原样显示
+- **会话级开关**：`/quill statusbar on|off|auto` 可对单个会话临时覆盖面板开关（不写回配置）
+- **LLM 智能提取**：前 5 级全部失败时调用轻量 LLM 做结构化提取（3s 超时保护，默认关闭）
+- **模型路由**：状态栏提取 LLM 可独立配置（`status_bar.llm_provider_id`），留空回退到 RAG 摘要 LLM，建议配置轻量模型降低成本
+
+### 安全与并发
+
+- 群聊权限控制：admin_users 白名单作用于聊天平台全部**写类**指令（改持久状态的子命令），读类指令保持开放；Web 面板由 AstrBot 鉴权保护
+- 全量 HTML 转义 + 模式值白名单，防止 XSS 注入
+- 世界书导入名称校验，仅允许字母数字 / 下划线 / 短横线 / CJK
+- 状态文件采用 tmp + fsync + os.replace 原子写入，防崩溃损坏
+- FAISS 索引基于 SQLite rowid，L2 归一化确保检索一致性
+- 后台任务统一 `_spawn` + `_bg_tasks` 管理，防止 GC 中断
+
+---
+
+## 指令说明
+
+### 角色卡管理 (`/char`)
+
+| 指令 | 说明 |
+|------|------|
+| `/char` | 列出所有可用角色卡 |
+| `/char <序号\|名字>` | 切换到指定角色卡 |
+| `/char info [序号\|名字]` | 查看角色卡详情及绑定信息 |
+| `/char export [序号\|名字]` | 导出角色卡 JSON |
+| `/char import <JSON>` | 从 JSON 文本导入角色卡 |
+| `/char unset` | 取消当前角色卡 |
+
+### 世界书管理 (`/wb`)
+
+| 指令 | 说明 |
+|------|------|
+| `/wb` | 列出世界书 |
+| `/wb <序号\|名字>` | 绑定世界书到当前用户 |
+| `/wb off` | 解绑全部世界书 |
+| `/wb info <序号\|名字>` | 查看世界书详情 |
+| `/wb reload` | 从磁盘重载全部世界书 |
+
+### 系统状态 (`/quill`)
+
+| 指令 | 说明 |
+|------|------|
+| `/quill` | 查看五大系统状态总览 |
+| `/quill help` | 折叠式指令速查（按五大系统分组，聊天窗口内可读） |
+| `/quill reset` | 重开当前角色卡这段剧情：清当前卡的对话上下文与日志，**保留动态记忆** |
+| `/quill status` | 查看插件健康度（RAG 检索成功率、状态栏解析成功率等） |
+| `/quill debug` | 调试信息：会话/配置/健康度/Session Vars |
+| `/quill test kb <文字>` | 测试写作素材库匹配 |
+| `/quill test wb <文字>` | 测试世界书命中 |
+| `/quill test mem <文字>` | 测试记忆检索 |
+
+### 动态记忆 (`/memory`)
+
+| 指令 | 说明 |
+|------|------|
+| `/memory` | 查看记忆统计 |
+| `/memory list [页码]` | 分页列出当前会话记忆 |
+| `/memory del <序号>` | 删除指定记忆 |
+| `/memory clear` | 清空当前会话所有记忆及对话日志 |
+| `/memory learn [内容]` | 手动添加新记忆 |
+| `/memory search <关键词>` | 关键词搜索记忆 |
+| `/memory pin <序号>` | 钉住/取消钉住指定记忆为核心记忆（永不遗忘） |
+| `/memory core <内容>` | 直接写入系统核心记忆（不参与遗忘） |
+| `@记住：<内容>` | 对话中自然语言写入核心记忆（群聊需 admin） |
+
+### 文档知识库 (`/doc`)
+
+| 指令 | 说明 |
+|------|------|
+| `/doc list` | 列出已加载的外部文档 |
+| `/doc search <关键词>` | RAG 检索返回原文片段 |
+| `/doc bind <序号>` | 绑定文档到当前角色卡 |
+| `/doc unbind <序号>` | 解绑文档 |
+| `/doc reload` | 重新加载文档索引 |
+
+### 其他控制
+
+| 指令 | 说明 |
+|------|------|
+| `/stream on\|off\|auto` | 控制流式输出模式 |
+| `/reinject` / `/重新注入` | 重置注入状态，触发重新注入常驻内容 |
+
+---
+
+## 管理面板
+
+进入 AstrBot WebUI → 插件 → Pages / 插件配置。**前端面板已按 macOS 桌面应用形态重建**——不只是配色，而是信息架构、控件体系、材质、动效与操作方式都对齐 Apple HIG 现行规范。
+
+- **窗口架构（边栏优先）**：侧栏是应用骨架，承载静态分组导航与六个页面的实时计数（分组标题为静态 section label，不折叠）；内容区为通栏标题带 + 列表，页面操作收进主按钮与 `⋯` 溢出菜单
+- **控件体系**：建立控件高度令牌（`--h-control` 等）与宽度令牌（`--w-num` / `--w-ctl` / `--w-wide`）及 macOS 字阶；配置页控件按三档宽度左对齐，并排控件高度统一，消除基线错位
+- **macOS 桌面交互**：弹层从窗口顶部垂落（sheet 语义）、右键上下文菜单、列表方向键导航（roving tabindex）、双击直接编辑、行内操作悬停显现
+- **卡片 = 浏览，编辑 = 模态**：卡片网格高度恒定（固定行高 132px、标签单行裁切），不就地展开编辑器，因此翻页时列表不会重排
+- **分页按真实几何计算**：每页条数由容器宽度（列数）与可用高度（行数）反推，行高/间距直接读 CSS 计算样式（单一来源）；分页栏钉在内容区底部、按钮定宽，连续翻页鼠标不必移动，页码在 resize / 筛选 / 删除后自动夹紧到有效范围
+- **配置页空间分配**：「注入引擎」为两列纵向栈（卡内不再留空洞）；「状态栏」为左列设置项 + 右列整列 Markdown 模板编辑器（模板 538px 宽、约 13 行可见）
+- **下拉与分段控件**：选项多的下拉用自绘 listbox（材质浮层、选中项打勾、方向键/首字母跳转、视口边缘自动翻转）；2–3 个固定选项的枚举用分段控件（选项常显、一次点击选中）。原生 `<select>` 始终保留为值存储，功能零回归
+- **语义分层**：侧栏与配置分区导航是应用导航 / 页内跳转（`aria-current`、`role="region"`），只有真正切换同一区域内容的地方（记忆子页、角色卡模态）用 tablist + tabpanel
+- **界面字体**：macOS 使用系统 SF Pro + 苹方（零下载）；其他平台自动加载 HarmonyOS Sans（按 unicode-range 分块，仅下载实际用到的字块）
+- **插件 Logo**：侧栏左上角使用插件 `logo.png`（面板内为 96×96 副本，覆盖 3 倍屏），加载失败时回退到「羽」字块
+- **无障碍**：焦点环统一、弹窗焦点陷阱与归还、`aria-expanded` 状态、并适配 `prefers-reduced-motion` / `-reduced-transparency` / `-contrast`
+
+> 面板仅针对**桌面端**设计。移动端适配已于 v5.2.3 移除。
+
+- **角色卡管理**：网格化卡片展示，新建/编辑/删除，V2 卡片导入，纯文本解析，头像上传与自定义裁剪
+- **写作素材库**：全文搜索，分类筛选，条目编辑，匹配测试台
+- **世界书**：多选配置，条目管理，ST 格式导入/导出
+- **文档知识库**：拖拽上传，已上传文档管理，语义检索测试
+- **动态记忆**：系统总览，搜索过滤，数据表格，JSON 备份与恢复，**对话日志查看器**（按会话浏览/导出 RP 对话记录）
+- **配置页面**：一键备份下载（zip 打包素材库/世界书/角色卡/记忆/文档索引），系统健康度卡片，流式模式批量控制
+
+---
+
+## 快速开始
+
+### 1. 安装依赖
+
+```bash
+pip install "Pillow>=10.0.0"
+pip install "faiss-cpu>=1.8.0" "numpy>=1.24.0" "aiosqlite>=0.19.0"
+```
+
+### 2. 安装插件
+
+将插件目录放入 AstrBot 的 `data/plugins/`，启动 AstrBot 后进入 WebUI → 插件管理 → 找到"羽笔"→ 点击"重载"启用。
+
+### 3. 基础配置
+
+1. 进入 WebUI → 插件配置 → 配置 LLM Provider（RAG 摘要 LLM 建议使用轻量模型）
+2. 在"权限"分组中配置 `admin_users`（群聊写指令需要，留空时群聊写指令被拦截）
+3. （可选）上传角色卡、世界书、写作素材，开始 RP 对话
+
+### 4. 验证
+
+发送 `/quill` 查看五大系统状态，或发送 `/char` 列出角色卡。所有功能均可在聊天窗口内通过指令操作，无需打开 Web 面板。
+
+---
+
+## 安装
+
+### 依赖
+
+```bash
+pip install "Pillow>=10.0.0"
+pip install "faiss-cpu>=1.8.0" "numpy>=1.24.0" "aiosqlite>=0.19.0"
+```
+
+Web 依赖（fastapi、quart）通常由 AstrBot 自带，缺失时手动安装。
+
+### 插件安装
+
+1. 将插件目录放入 AstrBot 的 `data/plugins/`
+2. 启动 AstrBot
+3. 进入 WebUI → 插件管理 → 找到"羽笔"
+4. 点击"重载"启用插件
+
+> Pillow 未安装时角色卡的 PNG/JPG 导入导出不可用，JSON 格式不受影响。
+
+---
+
+## 配置
+
+通过 AstrBot WebUI 可视化配置，主要分组：
+
+| 分组 | 说明 |
+|------|------|
+| 世界书 | 开关、容量、Token 上限、匹配灵敏度、注入位置、触发日志 |
+| 写作素材库 | 开关、最大注入条数、回退条数、去重上限 |
+| RAG | Embedding/Rerank 提供商、本地模型、分块参数、检索数量、记忆开关 |
+| 性能 | Prompt 截断上限、最低回复字数 |
+| 状态栏 | 开关、字段定义、格式模板、剧情走向选项 |
+| 反拒绝 | 开关、匹配模式 |
+| 调试 | 调试日志开关、全量备份导出/恢复 |
+| 权限 | 管理员 ID 白名单（仅群聊写指令需要） |
+
+> **权限说明**：`admin_users` 仅作用于聊天平台的群聊写指令。配置后仅白名单用户可在群聊执行写操作，留空时群聊写指令被拦截。私聊与 Web 面板编辑不受此限制——Web 面板由 AstrBot 鉴权保护。
+>
+> 写指令的范围是「会改动持久状态」的全部子命令：角色卡切换/取消/导入、世界书与文档的绑定/解绑/重载、记忆的删除/清空/写入、`/quill reset`、`/reinject`、`/stream` 与 `/quill statusbar` 的写入、以及 `/quill debug`（输出含会话标识与注入构成）。读类指令（list / info / search / 无参数状态查询）在群聊对所有人开放。
+
+---
+
+## 开发约定
+
+**日志一律使用 `from astrbot.api import logger`**，禁止 `import logging` /
+`logging.getLogger()`。这是 AstrBot 插件市场的硬性上架规则（LLM Guard 审查项），
+违反会直接 Rejected。全仓库应当满足：
+
+```bash
+grep -rn "import logging" --include=*.py .   # 期望输出为空
+```
+
+带 `__main__` 自测入口的模块（`kb.py`、`state.py`、`activation.py` 等）
+若要在插件外直接 `python <file>` 运行，用 `_astrbot_bootstrap.ensure_astrbot_importable()`
+把 AstrBot 加入导入路径即可——不要为了跑自测而回退到内置 logging。
+
+---
+
+## 架构
+
+```
+astrbot_plugin_quillplus/
+├── main.py                  # 组合根：插件注册桩 + 组件接线（钩子/指令桩一行委托实现层）
+├── interfaces/              # 框架适配层（钩子/指令实现、Web 层）
+│   ├── astrbot_hooks.py     # 6 个 LLM 钩子的实现函数
+│   └── web/
+│       └── upload.py        # 统一上传通道（multipart / 表单 b64 / JSON b64 三通道消歧）
+├── quill/                   # 与 AstrBot 解耦的核心包（不 import astrbot，可独立测试）
+│   ├── core/                # 错误体系、可重入锁、路径安全、原子写、日志桥
+│   └── services/            # 业务服务：状态栏解析/渲染、记忆、角色卡、响应清洗、热路径增量清洗等
+├── web_routes.py            # Web API 路由
+├── _route_core.py           # 业务 handler 实现
+├── config.py                # 配置解析层
+├── props.py                 # 配置投影：属性访问器（实时读 config）
+├── persona_manager.py       # 角色卡 JSON CRUD + V2 导入导出
+├── worldbook.py             # 世界书 JSON 管理
+├── kb.py                    # 写作素材库 SQLite（文件名保留历史兼容；内部类名 WritingResourceManager）
+├── prompt_builder.py        # 四层 Prompt 装配
+├── encryption.py            # Base64 编解码
+├── state.py                 # 用户状态管理（session_vars 持久化）
+├── activation.py            # 激活检测
+├── commands.py              # 指令业务逻辑
+├── _fts_util.py             # FTS5 转义/短词工具（kb 与 memory_store 共用）
+├── _astrbot_bootstrap.py    # 独立运行自测时的 AstrBot 导入路径引导（不含日志降级）
+├── quill_rag/               # RAG + 记忆共享模块
+│   ├── embedding.py         # Embedding 封装
+│   ├── vector_store.py      # FAISS 向量存储 (Doc RAG)
+│   ├── memory_store.py      # SQLite BLOB + NumPy (动态记忆)
+│   ├── chunker.py           # 文档分块
+│   ├── reranker.py          # Rerank 封装
+│   ├── llm_summarizer.py    # LLM 摘要生成
+│   └── retrieval.py         # 统一检索入口
+├── pages/panel/             # 管理面板：index.html + css/ + js/（原生 ES Modules，无构建步骤）
+└── worldbooks/              # 世界书目录（gitignore）
+```
+
+### LLM Hooks 执行流程
+
+```
+on_waiting_llm_request (priority=100)  →  控制流式模式
+        ↓
+on_llm_request (priority=100)  →  检测激活 + 注入 System Prompt + 改写 tool desc + 追加 tail
+        ↓
+on_using_llm_tool (priority=200)  →  Markdown 清理 + 状态栏解析/格式化/剥离
+        ↓
+on_llm_response (priority=10)  →  Base64 解密 + 状态栏兜底/剥离 + 拒绝检测
+        ↓
+on_llm_tool_respond (priority=10)  →  停止 agent loop + 记忆存储
+```
+
+---
+
+## Roadmap
+
+QuillPlus 遵循持续迭代的开发路线，当前（v5.3）已完成以下里程碑：
+
+- ✅ **v5.3.0** — 结构重构：main.py 六钩子薄化为注册桩 + `interfaces/` 适配层，业务下沉 `quill/` 服务分层（与 AstrBot 解耦、可独立测试）；开发期建立 pytest 双模回归测试（本地运行）；统一上传通道与路径安全加固；热路径历史清洗 O(历史长度)→O(增量)；修复真机实测与自查的 10 项正确性缺陷（详见 CHANGELOG）
+- ✅ **v5.0** — 重构首发版：平行宇宙双轴隔离、JSON 原子化状态机、全链路异步化、Character Card V2 全量支持
+- ✅ **v5.1** — 全自动自迭代记忆：闲时反思守护进程、核心记忆更新、混合检索 (FTS5+Vector+RRF)、LRU 会话缓存
+- ✅ **v5.2/v5.2.1** — 面板功能补全：对话日志查看器、全量备份导出/恢复、WR 批量操作、移动端底部导航、MD3 全面重构、四轮代码审查修复
+- ✅ **v5.2.5** — 上架合规：logger 全部改为 `from astrbot.api import logger`（19 个模块，审查意见只列了 7 个文件）；修复独立审计的 8 项正确性缺陷；5 个漏网写类指令补管理员校验
+- ✅ **v5.2.4** — 状态栏降级链重构为分级注册表（逐级命中率可见、单级异常不再掀翻整链）；修复三个「面板能改但运行期不生效」缺陷（裸 `[LOVE_DATA]` 在多轮工具调用时泄漏、`rag.enable_memory`/`top_k` 不热生效、`worldbook.enabled` 无消费者）；清理已弃用配置键与死代码；配置页文字/指令帮助/文档全面对齐实现
+- ✅ **v5.2.4（对话隔离）** — 切换角色卡自动隔离对话历史（每张卡绑定独立 AstrBot 对话，切回仍见原历史）；`/quill reset` 改为**保留动态记忆**、只清当前角色卡的对话上下文与日志（重开剧情而非抹掉记忆）
+- ✅ **v5.2.4（审计八项）** — 独立审计的 8 项正确性缺陷：反思误删未参与总结的日志（并可能清空核心记忆）、状态旧快照覆盖新快照、向量失败谎报上传成功、RAG 重建缺生命周期保护、配置保存失败未回滚 Retriever、记忆向量失败时不返回关键词结果、素材库回退丢弃 FTS 命中、检索失败被计入成功率
+- ✅ **v5.2.3** — 面板按 Apple HIG 全面重写：系统色/字阶/材质/弹簧动效、图标符号表、事件委托重构；接入 HarmonyOS Sans；修复 3 个沙箱 iframe 专属缺陷（配置页锁死、脚本中断、偏好不持久）
+- ✅ **v5.2.3（桌面化修订）** — 面板重建为 macOS 桌面应用形态：边栏优先架构、控件高度令牌体系、弹层顶部垂落、右键菜单、方向键导航、双击编辑、自绘下拉 listbox、分类固定调色板；移除移动端；修复 11 项既有缺陷（含分类筛选与 Alt+数字快捷键长期失效）
+
+**下阶段规划：**
+
+- 🔜 **近期**
+  - 状态栏变化高亮（前端）— 后端字段变更追踪已就绪，面板消费后即可高亮数值变化
+  - 世界书匹配测试台 — 可视化测试关键词命中与注入结果，与 WR 测试台对齐
+  - WR 批量移动/分类 — 复用已就绪的多选与批量 API 框架
+- 🔜 **中期**
+  - 配置预设方案 — 导出/导入当前配置为 JSON，便于社区分享开箱即用方案
+  - 记忆时间线视图 — 按会话可视化记忆的生成/召回/遗忘脉络
+  - 性能面板 — 注入 token 构成实时统计（/quill debug 的面板化）
+- 🔮 **远期**
+  - i18n — 国际化支持（待社区需求驱动）
+
+> **关于前端构建链的约束**：面板已拆分为 index.html + 独立 CSS/JS 模块（原生 ES Modules，无构建步骤，以源文件形态直接分发）。AstrBot 的 Plugin Pages 对每个文件单独鉴权且强制禁缓存，引入打包/压缩构建链收益有限，暂不引入。
+
+---
+
+## FAQ
+
+**Q: 为什么不直接使用市场上的世界书插件？**
+A: 大多数世界书插件仅提供关键词注入。QuillPlus 在此基础上补充了角色卡管理、写作素材库、文档 RAG 和动态记忆四个附加模块，构成完整的 RP 工作流。
+
+**Q: 可以在手机端使用吗？**
+A: 可以。通过发送指令（`/char`、`/wb`、`/memory`、`/quill` 等）在聊天窗口直接管理功能，无需打开 Web 面板。
+
+**Q: 角色卡和其他插件冲突吗？**
+A: QuillPlus 使用独立的 JSON 存储，不依赖 AstrBot 原生的 persona 系统，不会影响其他插件数据。
+
+**Q: Embedding 和 Rerank 模型推荐？**
+A: 推荐 SiliconFlow 的 `Qwen3-Embedding-8B` 和 `bge-reranker-v2-m3`。不配置时自动使用本地模型 `BAAI/bge-small-zh-v1.5`。
+
+**Q: 动态记忆会串群吗？**
+A: 使用 `event.unified_msg_origin` 作为 session_id，SQL 按 session_id 过滤，天然隔离。
+
+**Q: 状态栏不显示或显示不正确？**
+A: 检查配置中状态栏是否开启；确认 LLM 输出格式是否匹配；可尝试开启前置模式提升服从度。
+
+**Q: 群聊指令不能用了？**
+A: 检查 `admin_users` 是否已配置。留空时群聊写指令被拦截，配置后仅白名单用户可执行。
+
+**Q: 切换 Embedding 模型后 RAG 检索失效？**
+A: 切换提供商会导致向量维度变化，插件会自动检测并重建 FAISS 索引，旧文档需重新上传。
+
+---
+
+### 前端面板加载说明
+
+AstrBot 框架的 Plugin Pages 静态文件服务默认设置 `Cache-Control: no-store`（强制禁用缓存）。面板由 index.html 与独立 CSS/JS 模块组成（约 30 个文件，合计约 350KB），每次刷新都会按文件重新加载。如果加载较慢，可以通过以下方式优化：
+
+1. **反向代理缓存**：在 AstrBot 前方部署 Nginx/Caddy，对插件 Pages 路径添加缓存头
+2. **本地缓存**：浏览器开发者工具中禁用 "Disable cache" 选项（仅对非 DevTools 窗口生效）
+
+> 该限制来自 AstrBot 框架层面。面板本身不依赖任何外部 CDN——界面字体异步加载，失败时自动回退系统字体；自绘下拉、右键菜单、方向键导航均为零依赖手写实现。
+
+---
+
+## Changelog
+
+完整更新日志请见 [CHANGELOG.md](./CHANGELOG.md)。
+
+---
+
+## License
+
+本项目基于 [GNU AGPL-3.0](./LICENSE) 开源。
+
+---
+
+## 鸣谢
+
+感谢原作者 Quill 提供的底层框架。本项目在其基础上进行了深度重构与增强。
+
+- [AstrBot](https://github.com/Soulter/AstrBot) — 提供可扩展的机器人插件框架
+- [HarmonyOS Sans](https://developer.huawei.com/consumer/cn/doc/design-guides/font-0000001828772001) — 管理面板界面字体（© 华为技术有限公司，依华为字体许可使用）。macOS 上使用系统 SF Pro / 苹方，不加载此字体
+- 面板设计参考 [Apple Human Interface Guidelines](https://developer.apple.com/design/human-interface-guidelines/)（配色、字阶、间距与动效数值均取自其现行发布值）

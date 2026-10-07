@@ -1,0 +1,204 @@
+{
+  "schedule_time": {
+    "description": "每日生成日程的时间 (HH:MM)",
+    "hint": "格式为 HH:MM。每天的这个时候生成日程",
+    "type": "string",
+    "default": "03:40"
+  },
+  "reference_history_days": {
+    "description": "生成时参考的历史日程天数",
+    "type": "int",
+    "slider": {
+      "min": 1,
+      "max": 7,
+      "step": 1
+    },
+    "default": 3
+  },
+  "reference_recent_count": {
+    "description": "生成时参考的近期会话数量",
+    "hint": "bot会从最近的会话中爬取聊天记录来辅助日程的生成, 设为 0 时，则不参考近期会话",
+    "type": "int",
+    "slider": {
+      "min": 0,
+      "max": 100,
+      "step": 1
+    },
+    "default": 10
+  },
+  "default_reference_umo": {
+    "description": "默认参考会话来源",
+    "hint": "留空则不使用默认参考会话。配置后，会作为定时生成日程或未指定会话来源时的兜底参考会话。填写格式：<bot>:<GroupMessage|FriendMessage>:id，例如 bot:GroupMessage:123456789。",
+    "type": "string",
+    "default": ""
+  },
+  "llm_provider": {
+    "description": "指定生成日程的 LLM 供应商",
+    "hint": "留空则使用当前正在使用的 LLM 供应商。",
+    "type": "string",
+    "_special": "select_provider",
+    "default": ""
+  },
+  "image_provider": {
+    "description": "指定图片转写使用的 LLM 供应商",
+    "hint": "留空则跟随生成日程的供应商；请单独选择支持图像输入的 provider，以兼容纯文本主模型。",
+    "type": "string",
+    "_special": "select_provider",
+    "default": ""
+  },
+  "geography_anchor": {
+    "description": "常驻地理锚点",
+    "hint": "用于约束日程的常驻生活圈和隐私边界；只写区级范围及不可泄露项。",
+    "type": "text",
+    "default": "深圳市罗湖区。常驻生活圈仅到区级；不生成、保存或透露住址、学校名称、校区、班级、联系方式。学校与家里只能写作私密场景泛称。"
+  },
+  "visual_identity_anchor": {
+    "description": "固定视觉身份锚点",
+    "hint": "日程与穿搭生成必须遵守的长期外貌事实。仅在角色外观正式改设时修改；当天衣服、发饰、场景可以变，但发色、核心五官不可被随机穿搭覆盖。",
+    "type": "text",
+    "editor_mode": true,
+    "editor_language": "markdown",
+    "default": "林小满的固定外观：奶油金色长发，扎成高双马尾；略厚刘海、发梢微乱、一撮压不下去的呆毛；绯红色上挑眼，左眼下有小泪痣，身形娇小纤细。发色与核心五官是长期固定事实，日程、穿搭、播报和自拍提示均不得改成黑发、棕发、白发或其他发色。当天只能变化服装、发饰、妆容、场景与活动。"
+  },
+  "public_place_seed": {
+    "description": "常驻生活圈公开地点",
+    "hint": "每行一个可公开提及的真实公共地点；工作日从这里选择，不用于推断住址或学校。",
+    "type": "text",
+    "default": "深圳市罗湖区·东门老街\n深圳市罗湖区·罗湖美术馆\n深圳市罗湖区·人民公园\n深圳市罗湖区·东湖公园\n深圳市罗湖区·仙湖植物园\n深圳市罗湖区·梧桐山风景区\n深圳市罗湖区·淘金山绿道\n深圳市罗湖区·深圳戏院\n深圳市罗湖区·罗湖区图书馆\n深圳市罗湖区·罗湖青少年宫"
+  },
+  "use_weekly_schedule": {
+    "description": "启用固定周课表兼容模式",
+    "hint": "关闭时由峰谷日历、节假日和当天随机结果共同决定。",
+    "type": "bool",
+    "default": false
+  },
+  "travel_itineraries": {
+    "description": "节假日旅行预设",
+    "hint": "可选的人工预设旅行计划；留空时不强制旅行。",
+    "type": "list",
+    "default": []
+  },
+  "travel_holiday_probability": {
+    "description": "节假日随机旅行概率",
+    "hint": "0 到 1；只在法定节假日参与判断，0 表示不随机触发旅行。",
+    "type": "float",
+    "default": 0.0
+  },
+  "travel_city_pool": {
+    "description": "节假日旅行城市池",
+    "hint": "仅在随机旅行触发时使用；留空时不临时杜撰目的地。",
+    "type": "list",
+    "default": []
+  },
+  "wardrobe": {
+    "description": "衣柜穿搭方案",
+    "hint": "每项只填写可复用的服装、鞋袜、配饰、发型、妆容、颜色材质、版型和穿戴约束。顺序就是‘穿搭N’的编号，新方案会追加到末尾。不要填写场景、动作、日程或镜头描述。",
+    "type": "template_list",
+    "default": [],
+    "templates": {
+      "outfit": {
+        "name": "穿搭方案",
+        "display_item": "description",
+        "hide_hint_in_list": true,
+        "items": {
+          "id": {
+            "description": "Stable wardrobe ID",
+            "type": "string",
+            "default": "",
+            "invisible": true
+          },
+          "description": {
+            "description": "穿搭描述",
+            "hint": "只填写服装、鞋袜、配饰、发型、妆容和造型细节；展示图请通过‘展示 穿搭N’绑定。",
+            "type": "text",
+            "default": ""
+          }
+        }
+      }
+    }
+  },
+  "wardrobe_migration_version": {
+    "description": "Wardrobe migration version",
+    "type": "int",
+    "default": 0,
+    "invisible": true
+  },
+  "pool": {
+    "description": "创意池",
+    "hint": "每次生成日程时，今日主题、心情色彩和日程类型会各随机选择一项",
+    "type": "object",
+    "items": {
+      "daily_themes": {
+        "description": "今日主题池",
+        "type": "list",
+        "default": [
+          "探索日",
+          "社交日",
+          "宅家日",
+          "工作日",
+          "自我提升日",
+          "休闲放松日",
+          "创意日",
+          "运动日",
+          "整理日",
+          "美食日",
+          "文艺日",
+          "随性漫游日"
+        ]
+      },
+      "mood_colors": {
+        "description": "心情色彩池",
+        "type": "list",
+        "default": [
+          "慵懒",
+          "活力",
+          "优雅",
+          "俏皮",
+          "神秘",
+          "温柔",
+          "冷艳",
+          "甜美",
+          "知性",
+          "随性",
+          "浪漫",
+          "清新"
+        ]
+      },
+      "outfit_styles": {
+        "description": "旧版穿搭风格池",
+        "hint": "仅用于升级迁移，插件启动后会自动转入衣柜并清空。",
+        "type": "list",
+        "invisible": true,
+        "default": []
+      },
+      "schedule_types": {
+        "description": "日程类型池",
+        "type": "list",
+        "default": [
+          "户外活动型",
+          "社交聚会型",
+          "独处充电型",
+          "技能学习型",
+          "随性漫游型",
+          "家务整理型",
+          "工作专注型",
+          "休闲娱乐型",
+          "健身运动型",
+          "美食探索型",
+          "文化艺术型",
+          "购物采买型"
+        ]
+      }
+    }
+  },
+  "prompt_template": {
+    "description": "LLM 生成日程的完整 Prompt 模板",
+    "hint":"插件内部支持格式化的占位符有： {date_str}、{weekday}、{holiday}、{persona_desc}、{daily_theme}、{mood_color}、{outfit_style}、{outfit_plan}、{schedule_type}、{history_schedules}、{recent_chats}。{r1} {r2} … 等 {rN} 格式会被自动替换为 1-100 的独立随机数。其他占位符默认会被替换为空字符串。清空可恢复默认。",
+    "type": "text",
+    "obvious_hint": true,
+    "editor_mode": true,
+    "editor_language": "markdown",
+    "editor_theme": "vs-dark",
+    "default": "# Role: Life Scheduler\n请根据以下信息，为自己规划一份今天的生活安排。\n\n## Context\n- 日期：{date_str} {weekday} {holiday}\n- 人设：{persona_desc}\n\n## 今日创意约束\n- 今日主题：【{daily_theme}】\n- 心情色彩：【{mood_color}】\n- 日程类型：【{schedule_type}】\n\n## 今日选定衣柜方案\n{outfit_plan}\n\n## 需要避免的重复内容\n{history_schedules}\n\n## 参考信息\n{recent_chats}\n\n## 强制约束\n- outfit 必须落实今日选定衣柜方案中已明确的服装、鞋袜、配饰、发型、妆容和穿戴约束，不得替换已明确的单品。\n- 你必须只输出 JSON 对象本体，不要 Markdown、代码块或解释。\n- JSON 必须包含 \"outfit_style\"、\"outfit\"、\"schedule\" 三个字段。\n- \"outfit_style\" 必须严格等于 \"{outfit_style}\"，\"outfit\" 第一行必须以 \"风格：{outfit_style}\" 开头。\n\n## Output Format\n{{\n  \"outfit_style\": \"{outfit_style}\",\n  \"outfit\": \"...\",\n  \"schedule\": \"...\"\n}}"
+  }
+}

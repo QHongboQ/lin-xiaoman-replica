@@ -1,0 +1,297 @@
+# -*- coding: utf-8 -*-
+"""检索 + 注入逻辑。Doc RAG 检索（FAISS + 重排）和记忆检索（NumPy）的统一入口。"""
+
+from __future__ import annotations
+
+import asyncio
+
+from astrbot.api import logger
+
+# 检索结果的失败标记键。之所以用「挂在 list 上的属性」而不是改成返回
+# 结构化对象：search_documents / search_memories 的调用方（含面板路由）
+# 都按 list 消费，改成别的对象要改一串调用点、收益却只是类型更漂亮。
+# 约定：带此属性且为 False = 检索出错（空结果是「真没找到」，不带此属性）。
+RAG_OK_ATTR = "_rag_ok"
+RAG_ERROR_ATTR = "_rag_error"
+
+
+class RagResult(list):
+    """list 子类，额外携带「本次检索是否成功」的标记。
+
+    必须子类化 list：内建 list 不允许 setattr（`AttributeError: 'list'
+    object has no attribute`），而调用方按 list 消费结果，所以不能换成
+    别的数据结构。
+    """
+
+    def __init__(self, items=None, ok: bool = True, error: str = ""):
+        super().__init__(items or [])
+        self.ok = ok
+        self.error = error
+
+    @property
+    def _rag_ok(self) -> bool:
+        return self.ok
+
+    @property
+    def _rag_error(self) -> str:
+        return self.error
+
+
+def _rag_failed(reason: str) -> RagResult:
+    """构造一个「检索失败」的空结果（仍是 list，可直接被现有调用方消费）。"""
+    return RagResult([], ok=False, error=str(reason))
+
+
+def rag_ok(result) -> bool:
+    """结果是否来自一次**成功**的检索（空结果也算成功）。"""
+    return bool(getattr(result, RAG_OK_ATTR, True))
+
+
+class QuillRetriever:
+    """统一检索入口。
+
+    - Doc RAG: FAISS 召回 + Rerank 重排
+    - Memory: SQLite + NumPy 余弦相似度
+    """
+
+    def __init__(
+        self,
+        embedding_provider,
+        vector_store=None,
+        reranker=None,
+        memory_store=None,
+        summarizer=None,
+        top_k: int = 3,
+        enable_memory: bool = False,
+        config=None,
+    ):
+        self.embedding = embedding_provider
+        self.vector_store = vector_store      # Doc RAG (FAISS)
+        self.reranker = reranker              # Doc RAG 重排
+        self.memory_store = memory_store      # 动态记忆 (SQLite)
+        self.summarizer = summarizer          # LLM 摘要
+        self.top_k = top_k
+        self.enable_memory = enable_memory
+        self.config = config
+        # F5 修复：保留后台 task 引用
+        self._bg_tasks: set = set()
+
+    def _spawn(self, coro):
+        """启动后台任务并保留引用，防止被 GC 中断"""
+        t = asyncio.create_task(coro)
+        self._bg_tasks.add(t)
+
+        def _on_done(task: asyncio.Task):
+            self._bg_tasks.discard(task)
+            if not task.cancelled() and task.exception() is not None:
+                logger.warning(f"[Quill] 后台任务 {task.get_coro()} 异常退出: {task.exception()}")
+
+        t.add_done_callback(_on_done)
+        return t
+
+    async def search_documents(self, query: str, allowed_sources: list[str] = None) -> list[dict]:
+        """Doc RAG 检索：FAISS 召回 + Rerank 重排（支持按源文档过滤）。
+
+        失败不再静默返回 []：异常时把 0 条结果挂上 `_rag_ok=False`，
+        让调用方能区分「确实没找到」（`_rag_ok` 缺省为 True）与
+        「embedding/索引出错」。此前两者都表现为 []，上层统一记
+        record_rag(True)，健康度里检索失败被算成成功。
+        """
+        if not self.vector_store or not query:
+            return []
+        try:
+            query_emb = await self.embedding.embed([query])
+            if not query_emb:
+                return _rag_failed("embedding 返回空向量")
+
+            # N5/D-清理：改用 QuillConfig 上的 typed 属性读取。原实现绕过它直接读
+            # config._raw（等于跳过了 _safe_int 钳位）：面板写入非法值时 int() 会在
+            # 这里抛错，被外层 except 变成「文档 RAG 永久不可用」，直到用户改回配置。
+            dense_top_k = int(getattr(self.config, "rag_dense_top_k", None) or self.top_k)
+
+            # 传递 allowed_sources 给 vector_store 过滤
+            raw_results = await self.vector_store.search(
+                query_emb[0], top_k=dense_top_k * 3, allowed_sources=allowed_sources
+            )
+
+            if not raw_results:
+                return []
+            if self.reranker:
+                return await self.reranker.rerank(query, raw_results, top_k=self.top_k)
+            return raw_results[:self.top_k]
+        except Exception as e:
+            # M3.2 D4：底层 StorageError（或 embedding 失败）在此降级为带失败
+            # 标记的空结果——注入侧行为不变（本轮无文档内容），健康度能记到失败。
+            logger.warning("[Quill RAG] search_documents 文档检索失败: %s", e, exc_info=True)
+            return _rag_failed(str(e))
+
+    async def search_memories(self, session_id: str, query: str) -> list[dict]:
+        """动态记忆检索：SQLite session 隔离 + NumPy 余弦相似度（在线程池中执行）。
+
+        失败语义同 search_documents：返回带 `_rag_ok=False` 的空列表。
+        """
+        if not self.memory_store or not self.enable_memory or not session_id or not query:
+            return []
+        try:
+            query_emb = await self.embedding.embed([query])
+            if not query_emb:
+                return _rag_failed("embedding 返回空向量")
+            results = await self.memory_store.search(session_id, query_emb[0], self.top_k, query_text=query)
+            if results:
+                mem_ids = [r["id"] for r in results]
+                self._spawn(self.memory_store.mark_memories_used(mem_ids, 1.5))
+            return results
+        except Exception as e:
+            # M3.2 D4：底层 StorageError 在此降级为带失败标记的空结果（行为同上）。
+            logger.warning("[Quill Memory] search_memories 记忆检索失败: %s", e, exc_info=True)
+            return _rag_failed(str(e))
+
+    async def get_core_memories(self, session_id: str) -> list[dict]:
+        """获取核心记忆（is_core=1），无条件注入，不参与 Top-K 竞争。"""
+        if not self.memory_store or not session_id:
+            return []
+        try:
+            return await self.memory_store.get_core_memories(session_id)
+        except Exception as e:
+            logger.warning("[Quill Memory] get_core_memories 核心记忆获取失败: %s", e, exc_info=True)
+            return []
+
+    async def log_chat_message(self, session_id: str, role: str, content: str):
+        """存储一条原始对话记录（在线程池中执行）"""
+        if not self.memory_store or not session_id or not content:
+            return
+        if not getattr(self.config, 'rag_enable_chat_logging', True):
+            return
+        try:
+            await self.memory_store.log_message(session_id, role, content)
+        except Exception as e:
+            # 底层 log_message 抛 StorageError（M3.2 D4）也在此吞掉：
+            # 落日志失败不连累本轮对话（该放行放行），仅日志更详细。
+            logger.warning("[Quill ChatLog] log_chat_message 对话记录失败: %s", e, exc_info=True)
+
+    async def store_memory_direct(self, session_id: str, content: str):
+        """直接存储一条用户提供的记忆内容（无需 user_input/ai_response 配对）。
+        用于 /memory learn 命令手动添加记忆。"""
+        if not self.memory_store or not self.enable_memory or not session_id or not content:
+            return
+        try:
+            summary = content.strip()
+            if self.summarizer:
+                summary = await self.summarizer.summarize(content, "")
+                if not summary:
+                    summary = content.strip()
+            summary = summary[:200]
+
+            vector = await self.embedding.embed([summary])
+            if vector:
+                await self.memory_store.add(
+                    session_id, summary, vector[0], chat_summary=content[:100]
+                )
+                logger.info(f"[Quill Memory] 直接记忆存储: session={session_id} summary={summary[:30]}...")
+        except Exception as e:
+            logger.warning("[Quill Memory] store_memory_direct 直接记忆存储失败: %s", e, exc_info=True)
+            raise
+
+    async def summarize_contexts(self, session_id: str, contexts: list[dict]) -> str:
+        """自动总结多轮对话历史，生成一条记忆并存储。
+
+        Args:
+            session_id: 会话 ID
+            contexts: 对话历史列表，每项含 role/content
+
+        Returns:
+            生成的摘要文本
+        """
+        if not self.memory_store or not self.enable_memory:
+            raise RuntimeError("动态记忆功能未启用")
+        if not contexts:
+            raise ValueError("对话历史不足，无法总结。")
+
+        # 1. 只取最近 6 轮（最多 12 条消息）
+        recent = contexts[-12:]
+
+        # 2. 格式化为结构化对话文本
+        lines = []
+        turn_count = 0
+        for msg in recent:
+            role = msg.get("role", "")
+            content = msg.get("content", "")[:300]
+            if role == "user":
+                lines.append(f"用户：{content}")
+                turn_count += 1
+            elif role == "assistant":
+                lines.append(f"AI：{content}")
+        combined = "\n".join(lines)
+
+        # 3. 调用 LLM 做结构化多轮摘要（复用 summarizer provider）
+        summary = ""
+        if self.summarizer and hasattr(self.summarizer, 'context_summarize'):
+            summary = await self.summarizer.context_summarize(combined, turn_count)
+        elif self.summarizer:
+            # 降级：用单轮 summarizer 兜底
+            summary = await self.summarizer.summarize(combined[:1500], "")
+        if not summary:
+            summary = f"最近{turn_count}轮对话片段：" + combined[:150]
+        summary = summary[:200]
+
+        # 4. Embedding → 存储
+        vector = await self.embedding.embed([summary])
+        if not vector:
+            raise RuntimeError("Embedding 生成失败")
+
+        # 5. 防重复：检查是否已有语义高度重叠的记忆
+        # B11：阈值必须打在**原始余弦** sim 上。vec_score 是排序分
+        # （sim × 时间衰减 + 引用频次加成 ×0.2）：一条 cosine 0.80 但被引用 6 次的
+        # 旧记忆就能到 0.92，于是真正的新记忆被当成重复丢弃，日志还把 0.93 报成
+        # similarity，排查时越看越偏。
+        if self.memory_store:
+            try:
+                existing = await self.memory_store.search(
+                    session_id, vector[0], top_k=3
+                )
+                for mem in existing:
+                    sim = mem.get("sim", 0.0)
+                    if sim > 0.92:
+                        logger.info(
+                            f"[Quill Memory] 跳过重复记忆: session={session_id} cosine={sim:.2f}"
+                        )
+                        return summary  # 已存在高度相似记忆，跳过存储
+            except Exception:
+                logger.debug("[Quill Memory] 重复记忆检查失败，继续存储", exc_info=True)
+
+        await self.memory_store.add(
+            session_id, summary, vector[0],
+            chat_summary=combined[:100]
+        )
+        logger.info(f"[Quill Memory] 上下文自动总结: session={session_id} turns={turn_count} summary={summary[:30]}...")
+
+        return summary
+
+    def format_for_prompt(self, doc_results: list[dict], memory_results: list[dict], core_memories: list[dict] = None) -> str:
+        """将检索结果格式化为 XML 规范文本。核心记忆优先注入，不参与 Top-K 竞争。"""
+        parts = []
+        # 核心记忆优先注入（无条件，类似人设基石）
+        if core_memories:
+            core_texts = [f"  [{i+1}] {r['summary']}" for i, r in enumerate(core_memories)]
+            parts.append("<core_memory>\n" + "\n".join(core_texts) + "\n</core_memory>")
+
+        if doc_results:
+            doc_texts = [f"  [{i+1}] [文档-{r.get('source', '?')}] {r['content']}" for i, r in enumerate(doc_results)]
+            parts.append("<documents>\n" + "\n".join(doc_texts) + "\n</documents>")
+
+        if memory_results:
+            mem_texts = [
+                f"  [{i+1}] [记忆] {r['summary']} (引用:{r.get('useful_count', 0)}次)"
+                for i, r in enumerate(memory_results)
+            ]
+            parts.append("<memories>\n" + "\n".join(mem_texts) + "\n</memories>")
+
+        if parts:
+            tag_hint = "、".join(filter(None, [
+                "<core_memory>" if core_memories else None,
+                "<memories>" if memory_results else None,
+                "<documents>" if doc_results else None,
+            ]))
+            parts.append(f"请自然地结合上述 {tag_hint} 提供的信息进行回复，保持设定的连贯性。")
+
+        return "\n\n".join(parts)

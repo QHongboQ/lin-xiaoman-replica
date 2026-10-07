@@ -1,0 +1,203 @@
+{
+  "max_retries": {
+    "description": "最大重试次数",
+    "hint": "模型输出未通过审核时的最大重试次数。建议保持较低值，有时因为上下文污染问题即使多次重试也不如一个 reset 命令清理上下文有效。",
+    "type": "int",
+    "default": 1
+  },
+  "check_input": {
+    "description": "检查用户输入",
+    "hint": "是否在请求主模型前检查用户输入；命中后会直接拦截，且不会调用主模型。在 combined_post 模式下，它也决定联审命中用户输入风险时是否允许按用户分支拦截。",
+    "type": "bool",
+    "default": true
+  },
+  "check_input_original_only": {
+    "description": "仅检查原始输入",
+    "hint": "开启后，用户输入审查只检查原始用户消息文本，不检查已被记忆/RAG等插件扩写后的 request.prompt，可避免因注入内容命中关键词而误判。",
+    "type": "bool",
+    "default": false
+  },
+  "check_output": {
+    "description": "检查模型输出",
+    "hint": "是否在模型回复后执行输出审查；命中后会按 max_retries 引导重新生成。",
+    "type": "bool",
+    "default": true
+  },
+  "block_duplicate_reply": {
+    "description": "拦截重复回复",
+    "hint": "是否拦截与同会话上一条模型回复完全一致的内容；命中后要求重新生成。",
+    "type": "bool",
+    "default": true
+  },
+  "reply_placeholder_on_block": {
+    "description": "拦截后回复默认消息",
+    "hint": "关闭后改为静默拦截；开启后会发送 block_message / input_block_message / blacklist.message 等提示。",
+    "type": "bool",
+    "default": true
+  },
+  "group_only": {
+    "description": "仅群聊生效",
+    "hint": "开启后私聊不会进入本插件逻辑。",
+    "type": "bool",
+    "default": false
+  },
+  "block_non_admin_slash_in_group": {
+    "description": "拦截群聊非管理员斜杠消息",
+    "hint": "注意本开关会拦截所有 AstrBot 命令。群聊中是否拦截非管理员发送的 / 开头消息；基于原始消息文本判断。",
+    "type": "bool",
+    "default": false
+  },
+  "keywords": {
+    "description": "关键词审核",
+    "hint": "关键词配置，注意这里配置的文本关键词会同时用于 LLM 审查，因此不必限制在单个词语，也可以是一句话或要求；会在 LLM 审核前先进行快速文本匹配，用于低成本拦截明显违规内容。",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "启用关键词检查",
+        "hint": "关闭后将跳过 plain_keywords 与 regex_rules；不会影响 llm_audit.enable。",
+        "type": "bool",
+        "default": true
+      },
+      "plain_keywords": {
+        "description": "纯文本关键词",
+        "hint": "纯文本敏感词列表，不按正则解析；推荐优先使用，适合大多数固定词语或短句场景。",
+        "type": "list",
+        "default": []
+      },
+      "regex_rules": {
+        "description": "正则规则",
+        "hint": "正则规则列表，适合复杂匹配；非法规则会被忽略并记录警告。",
+        "type": "list",
+        "default": []
+      }
+    }
+  },
+  "whitelist": {
+    "description": "SID 白名单",
+    "hint": "命中白名单 SID 的会话来源将跳过本插件的输入/输出审查；若同时命中黑名单，黑名单优先。SID 即 AstrBot 的 unified_msg_origin，可通过内置 sid 指令查看。",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "启用白名单",
+        "hint": "关闭后不会根据 sids 跳过审查。",
+        "type": "bool",
+        "default": false
+      },
+      "sids": {
+        "description": "白名单 SID 列表",
+        "hint": "填写 AstrBot 的 unified_msg_origin 字符串，例如 aiocqhttp:group:123456789。命中后整条来源会话跳过审查。",
+        "type": "list",
+        "default": []
+      }
+    }
+  },
+  "llm_audit": {
+    "description": "LLM 自审查",
+    "hint": "可分别为输入/输出审查指定提供商；会增加延迟与 API 调用量。",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "启用 LLM 审查",
+        "hint": "关闭后不会调用审查模型；若 keywords.enable=true，关键词检查仍会生效。",
+        "type": "bool",
+        "default": true
+      },
+      "mode": {
+        "description": "审查模式",
+        "hint": "separate=输入和输出分开审查；combined_post=跳过输入阶段的 LLM 审查，在输出阶段一次性同时审查用户输入和模型回复。若 check_input=false，则联审即使命中用户输入风险也不会按用户分支拦截。",
+        "type": "string",
+        "default": "separate",
+        "options": ["separate", "combined_post"],
+        "labels": ["分离审查", "后置联审"]
+      },
+      "provider_id": {
+        "description": "默认审查提供商",
+        "hint": "默认审查提供商，建议使用稳定且响应快的小模型。也是 combined_post 模式下的默认审查提供商。",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider"
+      },
+      "input_provider_id": {
+        "description": "输入审查提供商",
+        "hint": "separate 模式下用户输入审查使用的提供商；留空则回退到 llm_audit.provider_id。",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider"
+      },
+      "output_provider_id": {
+        "description": "输出审查提供商",
+        "hint": "separate 模式下模型输出审查使用的提供商；留空则回退到 llm_audit.provider_id。",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider"
+      },
+      "prompt": {
+        "description": "队列审查模式提示词模板",
+        "hint": "separate 模式下使用的审查提示词；必须返回 {\"safe\": bool, \"reason\": str}。{text}=待审查文本，{keywords}=关键词列表。",
+        "type": "string",
+        "default": "请判断以下文本是否包含以下要素：{keywords}\n请严格仅返回如下 JSON 格式，不要包含任何额外文字：\n{\"safe\": true/false, \"reason\": \"简要说明原因\"}\n\n待审查文本：\n{text}"
+      },
+      "combined_prompt": {
+        "description": "后置审查模式提示词模板",
+        "hint": "combined_post 模式下使用的审查提示词；必须返回 {\"user_safe\": bool, \"ai_safe\": bool, \"reason\": str}。{user_text}=用户输入，{ai_text}=模型回复，{keywords}=关键词列表。",
+        "type": "string",
+        "default": "请分别判断以下对话中的【用户消息】和【AI回复】是否包含以下要素：{keywords}\n请严格仅返回如下 JSON 格式，不要包含任何额外文字：\n{\"user_safe\": true/false, \"ai_safe\": true/false, \"reason\": \"简要说明原因\"}\n\n【用户消息】：\n{user_text}\n\n【AI回复】：\n{ai_text}"
+      }
+    }
+  },
+  "safety_prompt": {
+    "description": "重试提示词模板",
+    "hint": "模型输出未通过审核后，会将该提示拼接到重试请求中；{reason} 会被替换为拦截原因。",
+    "type": "string",
+    "default": "你之前的回复未通过内容安全审核，被拦截了。\n拦截原因：{reason}\n\n请重新回复用户的消息，保持有用和完整，但务必确保内容合规、安全，不要包含任何敏感或不适当的内容。"
+  },
+  "block_message": {
+    "description": "重试失败默认消息",
+    "hint": "所有输出重试都失败后发送的安全兜底消息。",
+    "type": "string",
+    "default": "抱歉，我无法回答这个问题。请换一个话题吧～"
+  },
+  "input_block_message": {
+    "description": "输入拦截提示",
+    "hint": "用户输入不合规时返回的提示；仅在 reply_placeholder_on_block=true 时生效。",
+    "type": "string",
+    "default": "你的消息包含不适当的内容，已被屏蔽。"
+  },
+  "prevention_prompt": {
+    "description": "安全提示词",
+    "hint": "会被拼接到 Astrbot 主对话模型 system_prompt 中作为预防性约束；{keywords} 会被替换为当前关键词列表。",
+    "type": "string",
+    "default": "**内容安全约束**你的回复不得包含以下要素：{keywords}。包含此类内容的回复将会被系统拦截。"
+  },
+  "blacklist": {
+    "description": "用户黑名单",
+    "hint": "对多次发送违规内容的用户自动拉黑；黑名单检查优先级高于白名单。",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "启用自动拉黑",
+        "hint": "用户输入多次未通过安全检查后自动封禁。",
+        "type": "bool",
+        "default": false
+      },
+      "duration": {
+        "description": "封禁时长（分钟）",
+        "hint": "0 表示永久封禁。",
+        "type": "int",
+        "default": 60
+      },
+      "max_violations": {
+        "description": "触发违规次数",
+        "hint": "累计达到该次数后自动拉黑。",
+        "type": "int",
+        "default": 3
+      },
+      "message": {
+        "description": "黑名单提示消息",
+        "hint": "仅在 reply_placeholder_on_block=true 且封禁后的首次拦截时发送。",
+        "type": "string",
+        "default": "你已因多次发送违规内容被临时限制使用，请稍后再试。"
+      }
+    }
+  }
+}

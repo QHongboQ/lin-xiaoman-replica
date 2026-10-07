@@ -1,0 +1,1598 @@
+# -*- coding: utf-8 -*-
+# Copyright (C) 2025 Nana7mi0721
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Quill Web API routes — AstrBot v4.26+ register_web_api 模式。
+
+所有 handler 使用 astrbot.api.web 的请求/响应抽象，
+与 FastAPI/Quart/Starlette 底层实现解耦。
+
+_route_core.py 提供纯 async handler（零 HTTP 依赖），
+本文件只做 HTTP ↔ 核心逻辑的适配。
+"""
+
+_ALLOWED_CONFIG_KEYS: set = {
+    # rag
+    ("rag", "embedding_provider_id"), ("rag", "rerank_provider_id"),
+    ("rag", "llm_provider_id"), ("rag", "enable_local_embedding"),
+    ("rag", "chunk_size"), ("rag", "chunk_overlap"),
+    ("rag", "top_k"), ("rag", "dense_top_k"),
+    ("rag", "enable_memory"), ("rag", "enable_chat_logging"),
+    ("rag", "enable_autonomous_reflection"),
+    ("rag", "chat_log_retention_days"),
+    # worldbook
+    ("worldbook", "enabled"), ("worldbook", "max_dynamic_entries"),
+    ("worldbook", "max_token_limit"), ("worldbook", "match_sensitivity"),
+    ("worldbook", "injection_position"), ("worldbook", "show_trigger_log"),
+    ("worldbook", "always_activate"),
+    # writing_resource
+    ("writing_resource", "enabled"), ("writing_resource", "max_entries"),
+    ("writing_resource", "fallback_top_count"), ("writing_resource", "category_dedup_limit"),
+    # performance
+    ("performance", "max_prompt_length"), ("performance", "min_output_length"),
+    ("performance", "max_output_length"),
+    # status_bar
+    ("status_bar", "enabled"), ("status_bar", "fields"),
+    ("status_bar", "format_template"), ("status_bar", "plot_paths"),
+    ("status_bar", "llm_extract"), ("status_bar", "llm_provider_id"),
+    ("status_bar", "default_placeholder"), ("status_bar", "show_delta"),
+    ("status_bar", "format_template_plain"), ("status_bar", "plain_platforms"),
+    # status_bar / JEV 模式（TypeSafe System One：推荐选择度 + 分支路由）
+    ("status_bar", "jev_enabled"), ("status_bar", "jev_provider_id"),
+    ("status_bar", "jev_confidence_floor"),
+    # refusal
+    ("refusal", "enabled"), ("refusal", "patterns"),
+    # debug
+    ("debug", "enabled"), ("debug", "show_inject_report"),
+    # permissions
+    ("permissions", "admin_users"),
+}
+
+import asyncio
+import os
+import tempfile
+from functools import wraps
+from pathlib import Path
+from urllib.parse import quote
+
+
+# 文件名 URL 编码（safe='' 确保 / 等字符也被编码，避免注入下载头）
+def _urlquote(name: str) -> str:
+    return quote(str(name), safe='')
+
+from astrbot.api.web import (
+    error_response,
+    json_response,
+    request,
+)
+
+# 字节流响应（file_response 仅支持文件路径，不适用内存字节）
+from starlette.responses import Response
+
+from astrbot.api import logger
+
+from ._backup_util import (
+    build_backup_zip,
+    is_sqlite_bytes,
+    remove_sidecars,
+)
+from ._paths import backup_sources, resolve_archive_dest
+from .quill.core.errors import QuillError, StorageError
+from .quill.core.storage_stats import note_storage_error
+
+from ._route_core import (
+    error_text,
+    handle_wr_list,
+    handle_wr_get,
+    handle_wr_create,
+    handle_wr_update,
+    handle_wr_delete,
+    handle_wr_toggle,
+    handle_wr_export,
+    handle_wr_import,
+    handle_wr_test,
+    handle_wr_categories,
+    handle_wr_batch_delete,
+    handle_wr_batch_toggle,
+    handle_wb_list,
+    handle_wb_get,
+    handle_wb_create,
+    handle_wb_delete,
+    handle_wb_entry_create,
+    handle_wb_entry_update,
+    handle_wb_entry_delete,
+    handle_wb_import_st,
+    handle_wb_export_st,
+    handle_rag_upload,
+    handle_rag_documents,
+    handle_rag_delete,
+    handle_rag_search,
+    handle_rag_config,
+    handle_memory_list,
+    handle_memory_delete,
+    handle_memory_list_all,
+    handle_memory_stats,
+    handle_memory_get,
+    handle_memory_prune,
+    handle_provider_list,
+    handle_memory_export,
+    handle_memory_import,
+    handle_chat_log_list,
+    handle_chat_log_export,
+)
+
+# M3.1 统一上传通道：文件读取 / base64 消歧 / 大小上限 / 扩展名集合的唯一实现
+from .interfaces.web.upload import (
+    BINARY_EXTS,
+    CARD_IMAGE_EXTS,
+    CARD_IMPORT_EXTS,
+    CARD_LIMIT,
+    DEFAULT_LIMIT,
+    UploadError,
+    UploadTooLarge,
+    _declared_length,
+    decode_base64,
+    read_upload,
+)
+from .quill.core.paths import sanitize_name
+
+PLUGIN_NAME = "astrbot_plugin_quillplus"
+
+#: 备份恢复包体积上限（M6.2）。备份只含插件数据根（DB + JSON + 头像），
+#: 512MB 已远超正常规模；上限存在的意义是挡住「用一个高压缩比 zip 撑爆内存
+#: 与事件循环」的构造请求。
+_MAX_RESTORE_BYTES = 512 * 1024 * 1024
+
+
+class _BytesUpload:
+    """bytes → upload-like 适配：handle_rag_upload 只需 ``async read()``。
+
+    （原 rag_upload / rag_upload_base64 内各自定义的 _BytesUpload/DummyFile
+    收敛为此处唯一实现。）
+    """
+
+    def __init__(self, content: bytes) -> None:
+        self._content = content
+
+    async def read(self) -> bytes:
+        return self._content
+
+
+async def _json_body() -> dict:
+    """安全地读取 JSON 请求体，保证返回 dict。
+
+    request.json(default={}) 只在「解析失败」时回退默认值：如果请求体本身是合法
+    JSON 但顶层不是对象（字符串 / 数字 / 数组，例如直接 POST 一个 "abc"），它会
+    原样返回，随后 data.get(...) 就抛 AttributeError，被 _api_handler 兜成 500。
+    这里统一收敛成 dict，非对象一律当空对象处理（后续的必填校验会给出 400）。
+    """
+    data = await request.json(default={})
+    return data if isinstance(data, dict) else {}
+
+
+def _api_handler(handler):
+    """统一的 handler 异常捕获装饰器。
+
+    未捕获异常转为 500 error_response，避免向前端泄露堆栈。
+
+    D11：`except QuillError` 分支让受控异常体系真正生效（此前 `status_code`
+    与 `to_payload` 零调用，所有失败一律 500——参数/冲突类错误也报成服务端故障，
+    还陪一条 logger.exception 噪音）。这里只回 `message`（类文档约定它是对用户
+    可见的中文摘要，`detail` 才是不外泄的内部上下文）。
+    """
+    @wraps(handler)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await handler(*args, **kwargs)
+        except QuillError as e:
+            logger.warning(
+                "[Quill Web] handler 受控失败 (%s): %s",
+                getattr(handler, "__name__", "?"), e,
+            )
+            return error_response(e.message, status_code=e.status_code)
+        except Exception as e:
+            # P1-1 修复：记录完整异常日志，前端仅返回通用错误，避免泄漏内部信息
+            logger.exception("[Quill Web] handler 异常 (%s): %s", getattr(handler, "__name__", "?"), e)
+            return error_response("服务器内部错误，请查看服务端日志", status_code=500)
+    return wrapper
+
+
+class QuillRoutes:
+    """Quill 插件后端 Web API 路由注册器。
+
+    用法::
+
+        QuillRoutes(wr_manager, wb_manager, context).register_all()
+    """
+
+    def __init__(self, wr_manager, wb_manager, context, config=None,
+                 rag_components=None, plugin=None, persona_manager=None):
+        self.wr_manager = wr_manager
+        self.wb_manager = wb_manager
+        self.context = context
+        self.config = config
+        self.plugin = plugin  # 直接引用插件实例，避免反射查找
+        self.persona_manager = persona_manager
+        # rag_components: dict with keys: embedding, vector_store, reranker, memory_store, summarizer
+        self.rag = rag_components or {}
+        # 备份导出与恢复互斥：此前两个并发恢复会各自解压/重建组件，互相覆盖文件
+        # 与路由引用，没有任何保护。
+        self._maintenance_lock = asyncio.Lock()
+
+    # ── 路由注册入口 ──────────────────────────────────────────
+
+    def register_all(self):
+        """一次性注册全部 Web API 路由（包含前端 panel 调用的全部端点）。"""
+        _r = self.context.register_web_api
+
+        # ── WR 写作素材库 (11 个) ──
+        _r(f"/{PLUGIN_NAME}/wr/list",         self.wr_list,        ["GET"],    "列出写作素材库条目")
+        _r(f"/{PLUGIN_NAME}/wr/get",          self.wr_get,         ["POST"],   "获取单个写作素材库条目")
+        _r(f"/{PLUGIN_NAME}/wr/create",       self.wr_create,      ["POST"],   "创建写作素材库条目")
+        _r(f"/{PLUGIN_NAME}/wr/update",       self.wr_update,      ["POST"],   "更新写作素材库条目")
+        _r(f"/{PLUGIN_NAME}/wr/delete",       self.wr_delete,      ["POST"],   "删除写作素材库条目")
+        _r(f"/{PLUGIN_NAME}/wr/toggle",       self.wr_toggle,      ["POST"],   "启用/禁用写作素材库条目")
+        _r(f"/{PLUGIN_NAME}/wr/export",       self.wr_export,      ["GET"],    "导出写作素材库")
+        _r(f"/{PLUGIN_NAME}/wr/import",       self.wr_import,      ["POST"],   "导入写作素材库")
+        _r(f"/{PLUGIN_NAME}/wr/test",         self.wr_test,        ["POST"],   "测试写作素材库匹配")
+        _r(f"/{PLUGIN_NAME}/wr/categories",   self.wr_categories,  ["GET"],    "列出写作素材库分类")
+        _r(f"/{PLUGIN_NAME}/wr/batch_delete", self.wr_batch_delete,["POST"],   "批量删除写作素材库条目")
+        _r(f"/{PLUGIN_NAME}/wr/batch_toggle", self.wr_batch_toggle,["POST"],   "批量启用/禁用写作素材库条目")
+
+        # ── WB 世界书 (13 个：含 reload) ──
+        _r(f"/{PLUGIN_NAME}/wb/list",         self.wb_list,        ["GET"],    "列出世界书")
+        _r(f"/{PLUGIN_NAME}/wb/get",          self.wb_get,         ["POST"],   "获取世界书详情")
+        _r(f"/{PLUGIN_NAME}/wb/create",       self.wb_create,      ["POST"],   "创建世界书")
+        _r(f"/{PLUGIN_NAME}/wb/delete",       self.wb_delete,      ["POST"],   "删除世界书")
+        # P3-3 修复：delete_book 与 delete 为同一逻辑（历史兼容端点），复用同一 handler
+        _r(f"/{PLUGIN_NAME}/wb/delete_book",  self.wb_delete,      ["POST"],   "删除整本世界书")
+        _r(f"/{PLUGIN_NAME}/wb/reload",       self.wb_reload,      ["POST"],   "重新加载世界书")
+        _r(f"/{PLUGIN_NAME}/wb/entry/create", self.wb_entry_create,["POST"],   "创建世界书条目")
+        _r(f"/{PLUGIN_NAME}/wb/entry/update", self.wb_entry_update,["POST"],   "更新世界书条目")
+        _r(f"/{PLUGIN_NAME}/wb/entry/delete", self.wb_entry_delete,["POST"],   "删除世界书条目")
+        _r(f"/{PLUGIN_NAME}/wb/import_st",    self.wb_import_st,   ["POST"],   "导入 ST 格式世界书")
+        _r(f"/{PLUGIN_NAME}/wb/import_json",  self.wb_import_json, ["POST"],   "导入 JSON(原生/ST)")
+        _r(f"/{PLUGIN_NAME}/wb/export_st",    self.wb_export_st,   ["GET"],    "导出 ST 格式世界书")
+
+        # ── Persona 角色卡 (独立 Quill 管理 + V2 兼容) ──
+        _r(f"/{PLUGIN_NAME}/persona/list",          self.persona_list,   ["GET"],    "列出角色卡")
+        _r(f"/{PLUGIN_NAME}/persona/avatar",        self.persona_avatar, ["GET"],    "获取角色卡头像(懒加载)")
+        _r(f"/{PLUGIN_NAME}/persona/create",        self.persona_create, ["POST"],   "创建角色卡")
+        _r(f"/{PLUGIN_NAME}/persona/update",        self.persona_update, ["POST"],   "更新角色卡")
+        _r(f"/{PLUGIN_NAME}/persona/delete",        self.persona_delete, ["POST"],   "删除角色卡")
+        _r(f"/{PLUGIN_NAME}/upload_avatar",         self.upload_avatar,  ["POST"],   "上传头像(文件)")
+        # M3.1：base64 变体与正身共用同一 handler（同上）
+        _r(f"/{PLUGIN_NAME}/upload_avatar_base64",  self.upload_avatar,  ["POST"],   "上传头像(Base64)")
+        _r(f"/{PLUGIN_NAME}/persona/import",        self.persona_import, ["POST"],   "导入V2角色卡(文件)")
+        _r(f"/{PLUGIN_NAME}/persona/import_base64", self.persona_import, ["POST"],   "导入V2角色卡(Base64)")
+        _r(f"/{PLUGIN_NAME}/persona/export",        self.persona_export, ["GET"],    "导出V2角色卡")
+        _r(f"/{PLUGIN_NAME}/persona/export_base64",     self.persona_export_base64, ["POST"], "导出V2角色卡(Base64)")
+        _r(f"/{PLUGIN_NAME}/persona/import_text",        self.persona_import_text, ["POST"], "文本导入角色卡")
+        # M3.1：base64 变体与正身共用同一 handler（同上）
+        _r(f"/{PLUGIN_NAME}/persona/import_text_base64", self.persona_import_text, ["POST"], "文本导入角色卡(Base64)")
+        _r(f"/{PLUGIN_NAME}/avatar/<path:filename>", self.serve_avatar,  ["GET"],    "获取头像文件")
+
+        # ── Info (世界书列表 + 触发日志) ──
+        _r(f"/{PLUGIN_NAME}/info",             self.info,           ["GET"],    "插件状态信息")
+
+        # ── 配置持久化 ──
+        _r(f"/{PLUGIN_NAME}/config/save",      self.config_save,    ["POST"],   "保存配置项")
+        _r(f"/{PLUGIN_NAME}/config/save_batch", self.config_save_batch, ["POST"], "批量保存配置项")
+        _r(f"/{PLUGIN_NAME}/config/all",       self.config_all,     ["GET"],    "获取全量配置")
+
+        # ── RAG 文档知识库 (5 个) ──
+        _r(f"/{PLUGIN_NAME}/rag/upload",       self.rag_upload,     ["POST"],   "上传文档")
+        # M3.1：base64 变体与正身共用同一 handler（通道消歧收敛于 upload.read_upload）
+        _r(f"/{PLUGIN_NAME}/rag/upload_base64", self.rag_upload,    ["POST"],   "上传文档(Base64)")
+        _r(f"/{PLUGIN_NAME}/rag/documents",    self.rag_documents,  ["GET"],    "列出已上传文档")
+        _r(f"/{PLUGIN_NAME}/rag/delete",       self.rag_delete,     ["POST"],   "删除文档")
+        _r(f"/{PLUGIN_NAME}/rag/search",       self.rag_search,     ["POST"],   "语义检索测试")
+        _r(f"/{PLUGIN_NAME}/rag/config",       self.rag_config,     ["GET"],    "RAG 配置状态")
+
+        # ── 动态记忆 (5 个) ──
+        _r(f"/{PLUGIN_NAME}/memory/list",      self.memory_list,    ["GET"],    "列出记忆")
+        _r(f"/{PLUGIN_NAME}/memory/list_all",  self.memory_list_all,["GET"],    "列出全部记忆(倒序)")
+        _r(f"/{PLUGIN_NAME}/memory/sessions",  self.memory_sessions,["GET"],    "列出所有会话")
+        _r(f"/{PLUGIN_NAME}/memory/stats",     self.memory_stats,   ["GET"],    "记忆存储统计")
+        _r(f"/{PLUGIN_NAME}/memory/get",       self.memory_get,     ["GET"],    "获取单条记忆详情")
+        _r(f"/{PLUGIN_NAME}/memory/delete",    self.memory_delete,  ["POST"],   "删除记忆")
+        _r(f"/{PLUGIN_NAME}/memory/pin",       self.memory_pin,     ["POST"],   "钉住/取消钉住核心记忆")
+        _r(f"/{PLUGIN_NAME}/memory/vector_search", self.memory_vector_search, ["POST"], "向量检索(Debug)")
+
+        # ── Provider 列表 (配置面板下拉) ──
+        _r(f"/{PLUGIN_NAME}/provider/list",    self.provider_list,  ["GET"],    "列出可用模型提供商")
+
+        # ── 记忆导入导出 ──
+        _r(f"/{PLUGIN_NAME}/memory/export",    self.memory_export, ["GET"],    "导出记忆(JSON)")
+        _r(f"/{PLUGIN_NAME}/memory/import",    self.memory_import, ["POST"],   "导入记忆(JSON)")
+        _r(f"/{PLUGIN_NAME}/memory/prune",     self.memory_prune,  ["POST"],   "修剪过期记忆")
+
+        # ── 对话日志 ──
+        _r(f"/{PLUGIN_NAME}/chatlog/list",     self.chat_log_list,  ["GET"],    "列出对话日志")
+        _r(f"/{PLUGIN_NAME}/chatlog/export",   self.chat_log_export, ["GET"],   "导出对话日志")
+
+        # ── Panel 主题 / 界面状态：已随配置项一并移除 ──
+        # 主题改由 AstrBot 面板注入 <html data-theme>（前端 app.js 读它），
+        # 界面折叠偏好则整体取消（面板已无折叠交互，无偏好需要跨刷新记住）。
+        # 两对端点此前仅为「旧客户端平滑过渡」保留，现前端已确认无调用方，
+        # 连同 debug.panel_theme / debug.panel_ui_state 两个配置键一起清掉。
+
+        # ── 流式模式批量控制 ──
+        _r(f"/{PLUGIN_NAME}/stream/stats",     self.stream_stats,     ["GET"],   "流式模式统计")
+        _r(f"/{PLUGIN_NAME}/stream/all",       self.stream_set_all,   ["POST"],  "批量设置流式模式")
+
+        # ── 会话状态清理（管理） ──
+        _r(f"/{PLUGIN_NAME}/state/cleanup",    self.state_cleanup,    ["POST"],  "按 UMO 前缀清理会话状态(默认 dry_run)")
+
+        # ── 全量备份导出/恢复 ──
+        _r(f"/{PLUGIN_NAME}/backup/export",   self.backup_export,  ["GET"],    "全量备份导出")
+        _r(f"/{PLUGIN_NAME}/backup/export_base64", self.backup_export_base64, ["GET"], "全量备份导出(Base64)")
+        _r(f"/{PLUGIN_NAME}/backup/restore",  self.backup_restore, ["POST"],   "从备份 zip 恢复(二进制)")
+        _r(f"/{PLUGIN_NAME}/backup/restore_base64", self.backup_restore_base64, ["POST"], "从备份 zip 恢复(Base64)")
+
+    # ── Info ──────────────────────────────────────────────────
+
+    @_api_handler
+    async def info(self):
+        """返回插件状态：可用世界书、触发日志。"""
+        from ._route_core import handle_info
+        show_log = False
+        if self.config is not None:
+            show_log = getattr(self.config, 'worldbook_show_log', False)
+        pc = 0
+        if self.persona_manager:
+            pc = await self.persona_manager.get_persona_count()
+        return await handle_info(
+            self.wr_manager, self.wb_manager,
+            persona_count=pc,
+            show_trigger_log=show_log,
+            health_tracker=self.plugin.health_tracker if self.plugin else None,
+        )
+
+    # ── Config Save ───────────────────────────────────────────
+
+    @_api_handler
+    async def config_save(self):
+        """保存配置项。Web 面板已由 AstrBot 鉴权保护，无需二次校验。"""
+        data = await _json_body()
+        group = data.get("group", "")
+        key = data.get("key", "")
+        value = data.get("value")
+
+        if not group or not key:
+            return error_response("缺少 group 或 key 参数", status_code=400)
+
+        if (group, key) not in _ALLOWED_CONFIG_KEYS:
+            return error_response(f"不支持的配置项: {group}.{key}", status_code=400)
+
+        plugin = self.plugin
+        if plugin is None:
+            return error_response("插件实例不可用", status_code=500)
+
+        ok = plugin.save_plugin_config(group, key, value)
+        if ok:
+            return json_response({"status": "ok", "message": f"已保存 {group}.{key}"})
+        return error_response("保存失败", status_code=500)
+
+    @_api_handler
+    async def config_save_batch(self):
+        """Persist all changed fields in one transaction and one hot reload."""
+        data = await _json_body()
+        updates = data.get("updates")
+        if not isinstance(updates, list) or not updates:
+            return error_response("缺少 updates 数组", status_code=400)
+        if len(updates) > 64:
+            return error_response("单次最多保存 64 项配置", status_code=400)
+
+        seen: set[tuple[str, str]] = set()
+        for item in updates:
+            if not isinstance(item, dict):
+                return error_response("配置更新格式无效", status_code=400)
+            group = str(item.get("group", "")).strip()
+            key = str(item.get("key", "")).strip()
+            pair = (group, key)
+            if pair not in _ALLOWED_CONFIG_KEYS:
+                return error_response(
+                    f"不支持的配置项: {group}.{key}", status_code=400
+                )
+            if pair in seen:
+                return error_response(
+                    f"重复的配置项: {group}.{key}", status_code=400
+                )
+            seen.add(pair)
+
+        plugin = self.plugin
+        if plugin is None:
+            return error_response("插件实例不可用", status_code=500)
+        saved, message = plugin.save_plugin_configs(updates)
+        if saved:
+            return json_response({"status": "ok", "message": message})
+        return error_response(f"保存失败: {message}", status_code=500)
+
+    @_api_handler
+    async def config_all(self):
+        """获取全量 config 供前端渲染（经 _ALLOWED_CONFIG_KEYS 白名单过滤，不下发未授权字段）。"""
+        if not self.config:
+            return json_response({})
+        raw = self.config.get_raw()
+        if not isinstance(raw, dict):
+            return json_response({})
+        safe = {}
+        for group, group_dict in raw.items():
+            if not isinstance(group_dict, dict):
+                continue
+            allowed = {
+                key: value for key, value in group_dict.items()
+                if (group, key) in _ALLOWED_CONFIG_KEYS
+            }
+            if allowed:
+                safe[group] = allowed
+        return json_response(safe)
+
+    # ── 流式模式批量控制 ───────────────────────────────────────
+
+    @_api_handler
+    async def stream_stats(self):
+        """返回所有 session 的流式模式统计。"""
+        plugin = self.plugin
+        if plugin is None or plugin.state_manager is None:
+            return json_response({"auto": 0, "on": 0, "off": 0, "total": 0})
+        stats = await plugin.state_manager.get_stream_mode_stats()
+        return json_response(stats)
+
+    @_api_handler
+    async def stream_set_all(self):
+        """批量设置所有 session 的流式模式。"""
+        plugin = self.plugin
+        if plugin is None or plugin.state_manager is None:
+            return error_response("插件实例不可用", status_code=500)
+        data = await _json_body()
+        mode = (data.get("mode") or "").strip().lower()
+        if mode not in ("auto", "on", "off"):
+            return error_response("无效模式，可选: auto/on/off", status_code=400)
+        count = await plugin.state_manager.set_stream_mode_all(mode)
+        mode_names = {"auto": "自动", "on": "强制流式", "off": "强制关闭"}
+        return json_response({
+            "status": "ok",
+            "data": {
+                "affected": count,
+                "mode": mode,
+                "message": f"已将 {count} 个会话的流式模式设为: {mode_names[mode]}"
+            }
+        })
+
+    # ── 会话状态清理（管理） ──────────────────────────────────────
+
+    @staticmethod
+    def _validate_cleanup_prefix(prefix: str) -> str | None:
+        """校验 state/cleanup 的 session_prefix；返回错误信息，None 表示通过。
+
+        UMO 键形如 ``平台:事件:平台ID!用户ID!会话``。放行条件：
+        至少 8 字符 **且包含 '!'** —— 即前缀至少定位到某个用户/会话边界；
+        裸平台前缀（``webchat:`` 无 '!'）会被拒，防止一键清掉全部真实会话。
+        误放量的最后一道闸是 StateManager 的单次删除上限（500）。
+        """
+        if not prefix:
+            return "缺少 session_prefix"
+        if any(ord(c) < 32 or c == "\x7f" for c in prefix):
+            return "session_prefix 含非法控制字符"
+        if len(prefix) < 8 or "!" not in prefix:
+            return (
+                "session_prefix 过宽或过短：需 ≥8 字符且包含 '!'"
+                "（至少定位到用户边界），例如 "
+                "webchat:FriendMessage:webchat!quilltest!"
+            )
+        return None
+
+    @_api_handler
+    async def state_cleanup(self):
+        """按 UMO 前缀清理 quill_state.json 里的会话状态键（管理端点）。
+
+        请求体 ``{"session_prefix": "...", "dry_run": true}``：
+        - **dry_run 默认 true**：只返回 matched/deleted=0/sample，不改动任何数据；
+        - dry_run=false 才真删；前缀校验 + 单次 500 上限双保险；
+        - 删除走 StateManager 锁内路径并置脏，由 autoflush 正常落盘。
+        """
+        plugin = self.plugin
+        if plugin is None or getattr(plugin, "state_manager", None) is None:
+            return error_response("状态管理器未加载", status_code=500)
+        data = await _json_body()
+        prefix = str(data.get("session_prefix") or "").strip()
+        dry_run = data.get("dry_run", True)
+        # 显式收 bool：JSON 里 "false" 是真值，字符串误传会把 dry_run 变成真删。
+        if not isinstance(dry_run, bool):
+            return error_response("dry_run 必须是布尔值", status_code=400)
+        err_msg = self._validate_cleanup_prefix(prefix)
+        if err_msg:
+            return error_response(err_msg, status_code=400)
+        try:
+            result = await plugin.state_manager.cleanup_states_by_prefix(
+                prefix, dry_run=dry_run
+            )
+        except ValueError as e:
+            return error_response(str(e), status_code=400)
+        return json_response({"status": "ok", "data": result})
+
+    # ── RAG ───────────────────────────────────────────────────
+
+    @_api_handler
+    async def rag_upload(self):
+        """上传文档（multipart 文件 / base64 双通道统一入口，M3.1 收敛）。
+
+        ``/rag/upload``（multipart）与 ``/rag/upload_base64``（JSON+b64_data，
+        面板 bridge 通道）共用同一 handler：通道消歧、50MB 上限、base64
+        解码全部收敛于 upload.read_upload。原 base64 变体的 ``source``
+        字段既是文件名（扩展名黑名单检查对象）也是文档名。
+        """
+        try:
+            payload = await read_upload(
+                request,
+                keys=("file",),
+                limit=DEFAULT_LIMIT,
+                filename_field="source",
+                default_filename="unknown",
+            )
+        except UploadTooLarge:
+            return error_response("文档文件过大（最大 50MB）", status_code=413)
+        except UploadError as e:
+            return error_response(error_text("Base64 解码失败", e), status_code=400)
+        if payload is None:
+            return error_response("未收到文件", status_code=400)
+        # 文件类型检测：仅支持纯文本文件（黑名单常量唯一来源：upload.BINARY_EXTS）
+        ext = os.path.splitext(payload.filename.lower())[1]
+        if ext in BINARY_EXTS:
+            return error_response(f"不支持的文件格式：{ext}。目前仅支持纯文本文件（.txt/.md/.csv/.json 等）。PDF/Word 请先转换为纯文本。", status_code=400)
+        source = payload.fields.get("source") or payload.filename
+        chunk_size = self.config.rag_chunk_size if self.config else 500
+        chunk_overlap = self.config.rag_chunk_overlap if self.config else 50
+        embedding = self.rag.get('embedding')
+        vector_store = self.rag.get('vector_store')
+        if embedding is None or vector_store is None:
+            return error_response("RAG 未初始化", status_code=500)
+        return json_response(
+            await handle_rag_upload(vector_store, embedding, _BytesUpload(payload.data), source, chunk_size, chunk_overlap)
+        )
+
+    @_api_handler
+    async def rag_documents(self):
+        """列出已上传文档。"""
+        vector_store = self.rag.get('vector_store')
+        if vector_store is None:
+            return error_response("RAG 未初始化", status_code=500)
+        return json_response(await handle_rag_documents(vector_store))
+
+    @_api_handler
+    async def rag_delete(self):
+        """删除文档。"""
+        data = await _json_body()
+        source = data.get("source", "")
+        if not source:
+            return error_response("缺少 source 参数", status_code=400)
+        vector_store = self.rag.get('vector_store')
+        if vector_store is None:
+            return error_response("RAG 未初始化", status_code=500)
+        return json_response(await handle_rag_delete(vector_store, source))
+
+    @_api_handler
+    async def rag_search(self):
+        """语义检索测试。"""
+        data = await _json_body()
+        query = data.get("query", "")
+        top_k = data.get("top_k", self.config.rag_top_k if self.config else 3)
+        if not query:
+            return error_response("缺少 query 参数", status_code=400)
+        embedding = self.rag.get('embedding')
+        vector_store = self.rag.get('vector_store')
+        reranker = self.rag.get('reranker')
+        if embedding is None or vector_store is None:
+            return error_response("RAG 未初始化", status_code=500)
+        return json_response(
+            await handle_rag_search(vector_store, embedding, reranker, query, top_k)
+        )
+
+    @_api_handler
+    async def rag_config(self):
+        """返回 RAG 配置状态（包含 LLM 提供商）。"""
+        embedding = self.rag.get('embedding')
+        reranker = self.rag.get('reranker')
+        resp = await handle_rag_config(embedding, reranker)
+        # 补充 LLM 提供商 ID
+        if resp.get('status') == 'ok' and self.config:
+            resp['data']['llm_provider_id'] = getattr(self.config, 'rag_llm_provider_id', '')
+        return json_response(resp)
+
+    # ── Memory ─────────────────────────────────────────────────
+
+    @_api_handler
+    async def memory_list(self):
+        """列出记忆。"""
+        memory_store = self.rag.get('memory_store')
+        if memory_store is None:
+            return error_response("记忆未初始化", status_code=500)
+        session_id = request.query.get("session_id")
+        return json_response(await handle_memory_list(memory_store, session_id))
+
+    @_api_handler
+    async def memory_list_all(self):
+        """列出全部记忆（跨 session），按创建时间倒序，支持分页。"""
+        memory_store = self.rag.get('memory_store')
+        if memory_store is None:
+            return error_response("记忆未初始化", status_code=500)
+        page = max(1, request.query.get("page", 1, type=int) or 1)
+        per_page = min(max(1, request.query.get("per_page", 50, type=int) or 50), 200)
+        return json_response(await handle_memory_list_all(memory_store, page=page, per_page=per_page))
+
+    @_api_handler
+    async def memory_sessions(self):
+        """P2-1: 列出所有有记忆的会话。"""
+        memory_store = self.rag.get('memory_store')
+        if memory_store is None:
+            return error_response("记忆未初始化", status_code=500)
+        sessions = await memory_store.list_sessions()
+        return json_response({"status": "ok", "data": {"sessions": sessions}})
+
+    @_api_handler
+    async def memory_stats(self):
+        """B4 修复：记忆存储统计（总数 / 活跃会话 / 今日新增）。"""
+        memory_store = self.rag.get('memory_store')
+        if memory_store is None:
+            return error_response("记忆未初始化", status_code=500)
+        return json_response(await handle_memory_stats(memory_store))
+
+    @_api_handler
+    async def memory_get(self):
+        """获取单条记忆完整详情。"""
+        memory_store = self.rag.get('memory_store')
+        if memory_store is None:
+            return error_response("记忆未初始化", status_code=500)
+        memory_id = request.query.get("id", type=int)
+        if not memory_id:
+            return error_response("缺少 id 参数", status_code=400)
+        return json_response(await handle_memory_get(memory_store, memory_id=memory_id))
+
+    @_api_handler
+    async def memory_vector_search(self):
+        """向量检索 Debug — 对输入文本做 embedding 后全局搜索。"""
+        data = await _json_body()
+        query = data.get("query", "")
+        top_k = data.get("top_k", 5)
+        if not query:
+            return error_response("缺少 query 参数", status_code=400)
+        memory_store = self.rag.get('memory_store')
+        if memory_store is None:
+            return error_response("记忆未初始化", status_code=500)
+        embedding = self.rag.get('embedding')
+        if embedding is None:
+            return error_response("Embedding 未初始化", status_code=500)
+        try:
+            vectors = await embedding.embed([query])
+            vector = vectors[0] if vectors else None
+            if not vector:
+                return error_response("embedding 向量化失败", status_code=500)
+            # 将 NumPy 全表扫描 + 矩阵计算放入线程池，防止阻塞事件循环
+            results = await memory_store.search_all(vector, top_k=top_k)
+            return json_response({"results": results, "query": query})
+        except Exception as e:
+            return error_response(error_text("检索失败", e), status_code=500)
+
+    @_api_handler
+    async def memory_export(self):
+        """导出全部记忆为 JSON。"""
+        memory_store = self.rag.get('memory_store')
+        if memory_store is None:
+            return error_response("记忆未初始化", status_code=500)
+        return json_response(await handle_memory_export(memory_store))
+
+    @_api_handler
+    async def memory_import(self):
+        """从上传的 JSON 文件导入记忆（异步，重新生成向量）。"""
+        memory_store = self.rag.get('memory_store')
+        if memory_store is None:
+            return error_response("记忆未初始化", status_code=500)
+        embedding = self.rag.get('embedding')
+        try:
+            data = await _json_body()
+        except Exception:
+            return error_response("请求体不是有效 JSON", status_code=400)
+        result = await handle_memory_import(memory_store, embedding, data)
+        if result.get("status") == "error":
+            return error_response(result.get("message", "导入失败"), status_code=400)
+        return json_response(result)
+
+    @_api_handler
+    async def memory_prune(self):
+        """一键清理低价值/过期记忆。"""
+        memory_store = self.rag.get('memory_store')
+        if memory_store is None:
+            return error_response("记忆系统未加载", status_code=500)
+        return json_response(await handle_memory_prune(memory_store))
+
+    @_api_handler
+    async def memory_delete(self):
+        """删除记忆。"""
+        data = await _json_body()
+        memory_store = self.rag.get('memory_store')
+        if memory_store is None:
+            return error_response("记忆未初始化", status_code=500)
+        return json_response(
+            await handle_memory_delete(memory_store, data.get("memory_id"), data.get("session_id"))
+        )
+
+    @_api_handler
+    async def memory_pin(self):
+        """钉住/取消钉住核心记忆。is_core=1 的记忆不参与 Top-K 竞争，直接注入 prompt。"""
+        memory_store = self.rag.get('memory_store')
+        if memory_store is None:
+            return error_response("记忆未初始化", status_code=500)
+        data = await _json_body()
+        memory_id = data.get("memory_id")
+        is_core = bool(data.get("is_core", False))
+        if not memory_id:
+            return error_response("缺少 memory_id", status_code=400)
+        # L7：非数字 memory_id 此前抛 ValueError 被 _api_handler 兜成 500（服务端
+        # 错误），其实是调用方参数不合法 → 400。同文件 chat_log_list 已用 type=int。
+        try:
+            memory_id_int = int(memory_id)
+        except (TypeError, ValueError):
+            return error_response("memory_id 必须是整数", status_code=400)
+        ok = await memory_store.set_core(memory_id_int, is_core)
+        if not ok:
+            return error_response("记忆不存在或更新失败", status_code=404)
+        return json_response({
+            "status": "ok",
+            "data": {"memory_id": memory_id, "is_core": is_core}
+        })
+
+    # ── Chat Log ──────────────────────────────────────────────
+
+    @_api_handler
+    async def chat_log_list(self):
+        """列出对话日志。"""
+        memory_store = self.rag.get('memory_store')
+        if memory_store is None:
+            return error_response("记忆系统未加载", status_code=500)
+        session_id = request.query.get("session_id")
+        # L7：非数字（?limit=abc）回落到默认值。不用 request.query.get(..., type=int)：
+        # 真机 PluginMultiDict 支持 type 参数，但显式解析在两种实现下行为一致。
+        try:
+            raw_limit = int(request.query.get("limit") or 200)
+        except (TypeError, ValueError):
+            raw_limit = 200
+        limit = min(max(1, raw_limit), 1000)
+        return json_response(await handle_chat_log_list(memory_store, session_id, limit))
+
+    @_api_handler
+    async def chat_log_export(self):
+        """导出对话日志。"""
+        memory_store = self.rag.get('memory_store')
+        if memory_store is None:
+            return error_response("记忆系统未加载", status_code=500)
+        session_id = request.query.get("session_id")
+        fmt = request.query.get("format", "markdown")
+        result = await handle_chat_log_export(memory_store, session_id, fmt)
+        if result.get("status") == "error":
+            return error_response(result.get("message", "导出失败"), status_code=400)
+        return json_response(result)
+
+    # ── Provider List ─────────────────────────────────────────
+
+    @_api_handler
+    async def provider_list(self):
+        """列出 AstrBot 中已配置的 Embedding / Rerank 提供商。"""
+        return json_response(await handle_provider_list(self.context))
+
+    # ── WR ────────────────────────────────────────────────────
+
+    @_api_handler
+    async def wr_list(self):
+        category = request.query.get("category")
+        search = request.query.get("search")
+        page = max(1, request.query.get("page", 1, type=int) or 1)
+        per_page = min(max(1, request.query.get("per_page", 20, type=int) or 20), 100)
+        is_constant_str = request.query.get("is_constant")
+        is_constant = (is_constant_str.lower() == 'true') if is_constant_str else None
+        return json_response(
+            await handle_wr_list(self.wr_manager, category, search, page, per_page, is_constant)
+        )
+
+    @_api_handler
+    async def wr_get(self):
+        data = await _json_body()
+        return json_response(
+            await handle_wr_get(self.wr_manager, data.get("entry_id"))
+        )
+
+    @_api_handler
+    async def wr_create(self):
+        return json_response(
+            await handle_wr_create(self.wr_manager, await _json_body())
+        )
+
+    @_api_handler
+    async def wr_update(self):
+        return json_response(
+            await handle_wr_update(self.wr_manager, await _json_body())
+        )
+
+    @_api_handler
+    async def wr_delete(self):
+        data = await _json_body()
+        return json_response(
+            await handle_wr_delete(self.wr_manager, data.get("entry_id"))
+        )
+
+    @_api_handler
+    async def wr_toggle(self):
+        data = await _json_body()
+        return json_response(
+            await handle_wr_toggle(
+                self.wr_manager,
+                data.get("entry_id"),
+                data.get("enabled", True),
+            )
+        )
+
+    @_api_handler
+    async def wr_export(self):
+        return json_response(await handle_wr_export(self.wr_manager))
+
+    @_api_handler
+    async def wr_import(self):
+        data = await _json_body()
+        return json_response(
+            await handle_wr_import(self.wr_manager, data.get("entries", []))
+        )
+
+    @_api_handler
+    async def wr_test(self):
+        data = await _json_body()
+        return json_response(
+            await handle_wr_test(self.wr_manager, data.get("text"))
+        )
+
+    @_api_handler
+    async def wr_categories(self):
+        return json_response(await handle_wr_categories(self.wr_manager))
+
+    @_api_handler
+    async def wr_batch_delete(self):
+        data = await _json_body()
+        entry_ids = data.get("entry_ids", [])
+        return json_response(await handle_wr_batch_delete(self.wr_manager, entry_ids))
+
+    @_api_handler
+    async def wr_batch_toggle(self):
+        data = await _json_body()
+        entry_ids = data.get("entry_ids", [])
+        enabled = bool(data.get("enabled", True))
+        return json_response(await handle_wr_batch_toggle(self.wr_manager, entry_ids, enabled))
+
+    # ── WB ────────────────────────────────────────────────────
+
+    @_api_handler
+    async def wb_list(self):
+        return json_response(await handle_wb_list(self.wb_manager))
+
+    @_api_handler
+    async def wb_get(self):
+        data = await _json_body()
+        return json_response(
+            await handle_wb_get(self.wb_manager, data.get("name"))
+        )
+
+    @_api_handler
+    async def wb_create(self):
+        data = await _json_body()
+        return json_response(
+            await handle_wb_create(
+                self.wb_manager,
+                data.get("name"),
+                data.get("description", ""),
+            )
+        )
+
+    @_api_handler
+    async def wb_delete(self):
+        data = await _json_body()
+        return json_response(
+            await handle_wb_delete(self.wb_manager, data.get("name"))
+        )
+
+    @_api_handler
+    async def wb_entry_create(self):
+        data = await _json_body()
+        return json_response(
+            await handle_wb_entry_create(
+                self.wb_manager,
+                data.get("name"),
+                data.get("entry"),
+            )
+        )
+
+    @_api_handler
+    async def wb_entry_update(self):
+        data = await _json_body()
+        entry_id = data.get("entry_id", data.get("id"))
+        return json_response(
+            await handle_wb_entry_update(
+                self.wb_manager,
+                data.get("name"),
+                entry_id,
+                data.get("entry"),
+            )
+        )
+
+    @_api_handler
+    async def wb_entry_delete(self):
+        data = await _json_body()
+        # 安全防御：兼容前端传 id 或 entry_id 的情况
+        entry_id = data.get("entry_id", data.get("id"))
+        return json_response(
+            await handle_wb_entry_delete(
+                self.wb_manager,
+                data.get("name"),
+                entry_id,
+            )
+        )
+
+    @_api_handler
+    async def wb_import_st(self):
+        """上传 ST 格式 lorebook 文件并导入。"""
+        # M6.2：此前是 limit=None（无大小上限）——请求体会被**全量读进内存**
+        # 再落盘到 imports/，一次性上传即可放大内存占用。世界书是纯文本设定集，
+        # 50MB（= RAG 文档通道的 DEFAULT_LIMIT）已远超任何真实用例，故收敛一致。
+        try:
+            payload = await read_upload(request, keys=("file",), limit=DEFAULT_LIMIT)
+        except UploadTooLarge:
+            return error_response("世界书文件过大（最大 50MB）", status_code=413)
+        except UploadError as e:
+            return error_response(error_text("Base64 解码失败", e), status_code=400)
+        if payload is None:
+            return error_response("未收到文件", status_code=400)
+
+        form = await request.form()
+        name = form.get("name")
+        if not name:
+            return error_response("缺少世界书名称", status_code=400)
+
+        # S1-8 修复：校验 name 防止路径遍历（../、/、\ 等）
+        from .worldbook import _validate_name
+        if not _validate_name(name):
+            return error_response("无效的世界书名称", status_code=400)
+
+        if not payload.data:
+            return error_response("上传的文件为空", status_code=400)
+
+        if self.plugin is None or not getattr(self.plugin, "paths", None):
+            return error_response("插件实例不可用", status_code=500)
+        # 写入导入暂存目录（数据根下的 imports/，不再写进插件目录）。
+        # 落盘走线程池：同步 write_bytes 在事件循环上会阻塞整台 bot 的聊天管道。
+        target_dir = Path(self.plugin.paths["imports_dir"])
+        await asyncio.to_thread(target_dir.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread((target_dir / f"{name}.json").write_bytes, payload.data)
+
+        return json_response(
+            await handle_wb_import_st(self.wb_manager, name, payload.data)
+        )
+
+    @_api_handler
+    async def wb_import_json(self):
+        """接收 JSON 文本数据并导入世界书（绕过沙盒 FormData 限制）。"""
+        data = await _json_body()
+        # 显式传 null 时 .get 的默认值不生效（键存在、值为 None），
+        # 直接 .strip() 会抛 AttributeError 被兜成 500。
+        name = (data.get("name") or "").strip()
+        file_data = data.get("data", "")
+        if not name:
+            return error_response("缺少世界书名称", status_code=400)
+        if not file_data:
+            return error_response("未收到文件数据", status_code=400)
+        # L7：data 字段是数组/对象/数字时，下面 f.write 会抛 TypeError →
+        # 被 _api_handler 兜成 500。参数问题应当是 400。
+        if not isinstance(file_data, str):
+            return error_response("data 字段必须是世界书 JSON 文本", status_code=400)
+        # 写入临时文件供 import_from_st 解析
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".json")
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                f.write(file_data)
+            if not await asyncio.to_thread(self.wb_manager.import_from_st, tmp_path, name):
+                return error_response("导入世界书失败", status_code=400)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        return json_response({"name": name, "message": "Worldbook imported"})
+
+    @_api_handler
+    async def wb_export_st(self):
+        name = request.query.get("name")
+        return json_response(
+            await handle_wb_export_st(self.wb_manager, name)
+        )
+
+    # ── WB Reload ─────────────────────────────────────────────
+
+    @_api_handler
+    async def wb_reload(self):
+        """重新从磁盘加载所有世界书后返回列表（供面板刷新按钮用）。"""
+        try:
+            # reload_all 是同步方法（加锁后重新读盘），不能 await。
+            # 它内部做文件 IO，放到线程里避免阻塞事件循环。
+            await asyncio.to_thread(self.wb_manager.reload_all)
+        except Exception:
+            logger.warning("[Quill] 世界书重载失败，返回当前缓存列表", exc_info=True)
+        return json_response(await handle_wb_list(self.wb_manager))
+
+    # ── Persona 角色卡 (Quill 独立管理) ──────────────────────────
+
+    @_api_handler
+    async def persona_list(self):
+        """返回所有角色卡（不含头像数据，前端通过 /persona/avatar 懒加载）。"""
+        if not self.persona_manager:
+            return json_response([])
+        personas = await self.persona_manager.load_all()
+        for p in personas:
+            avatar_path = p.get("avatar_path", "")
+            p["has_avatar"] = bool(avatar_path and avatar_path.startswith("quill_avatars/"))
+            p.pop("avatar_url", None)  # 不内联 Base64，前端按需懒加载
+        return json_response(personas)
+
+    @_api_handler
+    async def persona_avatar(self):
+        """单独获取某个角色卡的头像（Base64 data URL），供前端懒加载。"""
+        if not self.persona_manager:
+            return error_response("角色卡管理器未加载", status_code=500)
+        persona_id = (request.query.get("id") or "").strip()
+        if not persona_id:
+            return error_response("缺少角色 ID", status_code=400)
+        persona = await self.persona_manager.get_persona(persona_id)
+        if not persona:
+            return error_response("角色卡不存在", status_code=404)
+        avatar_path = persona.get("avatar_path", "")
+        if not avatar_path or not avatar_path.startswith("quill_avatars/"):
+            return json_response({"avatar_url": ""})
+        fname = avatar_path[len("quill_avatars/"):]
+        data = await self.persona_manager.read_avatar(fname)
+        if not data:
+            return json_response({"avatar_url": ""})
+        import base64
+        ext = os.path.splitext(fname)[1].lower()
+        mime_map = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif'}
+        mime = mime_map.get(ext, 'image/png')
+        return json_response({"avatar_url": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"})
+
+    @_api_handler
+    async def persona_create(self):
+        """创建角色卡。"""
+        data = await _json_body()
+        if not self.persona_manager:
+            return error_response("角色卡管理器未加载", status_code=500)
+        try:
+            result = await self.persona_manager.create_persona(data)
+            return json_response(result)
+        except ValueError as e:
+            return error_response(str(e), status_code=400)
+
+    @_api_handler
+    async def persona_update(self):
+        """更新角色卡（支持部分更新）。"""
+        data = await _json_body()
+        persona_id = (data.get("id") or "").strip()
+        if not persona_id:
+            return error_response("缺少 id 参数", status_code=400)
+        if not self.persona_manager:
+            return error_response("角色卡管理器未加载", status_code=500)
+        try:
+            result = await self.persona_manager.update_persona(persona_id, data)
+            return json_response(result)
+        except ValueError as e:
+            return error_response(str(e), status_code=400)
+
+    @_api_handler
+    async def persona_delete(self):
+        """删除角色卡。"""
+        data = await _json_body()
+        persona_id = (data.get("id") or "").strip()
+        if not persona_id:
+            return error_response("缺少 id 参数", status_code=400)
+        if not self.persona_manager:
+            return error_response("角色卡管理器未加载", status_code=500)
+        try:
+            await self.persona_manager.delete_persona(persona_id)
+            return json_response({"id": persona_id, "message": "Persona deleted"})
+        except ValueError as e:
+            return error_response(str(e), status_code=404)
+
+    # ── Persona 扩展功能：头像上传 / V2 导入导出 ──────────────────
+
+    @_api_handler
+    async def upload_avatar(self):
+        """上传头像图片（multipart 文件 / base64 双通道统一入口，M3.1 收敛）。
+
+        ``/upload_avatar``（multipart）与 ``/upload_avatar_base64``
+        （JSON+b64_data）共用同一 handler；5MB 上限与通道消歧收敛于
+        upload.read_upload。
+        """
+        if not self.persona_manager:
+            return error_response("角色卡管理器未加载", status_code=500)
+
+        try:
+            payload = await read_upload(
+                request, keys=("file",), limit=CARD_LIMIT, default_filename="avatar.png"
+            )
+        except UploadTooLarge:
+            return error_response("图片文件过大（最大 5MB）", status_code=413)
+        except UploadError as e:
+            return error_response(error_text("Base64 解码失败", e), status_code=400)
+        if payload is None:
+            return error_response("未收到文件", status_code=400)
+
+        try:
+            rel_path = await self.persona_manager.save_avatar(payload.filename, payload.data)
+            url = f"/{PLUGIN_NAME}/avatar/{os.path.basename(rel_path)}"
+            return json_response({"url": url, "path": rel_path, "message": "Avatar uploaded"})
+        except Exception as e:
+            return error_response(error_text("保存失败", e), status_code=500)
+
+    @_api_handler
+    async def persona_import(self):
+        """导入 V2 角色卡（multipart 文件 / base64 双通道统一入口，M3.1 收敛）。
+
+        扩展名白名单为原两通道并集（含 .webp，BASELINE §8.1 决策）；
+        5MB 上限与通道消歧收敛于 upload.read_upload。
+        """
+        if not self.persona_manager:
+            return error_response("角色卡管理器未加载", status_code=500)
+
+        try:
+            payload = await read_upload(
+                request, keys=("file",), limit=CARD_LIMIT, default_filename="card.png"
+            )
+        except UploadTooLarge:
+            return error_response("文件过大（最大 5MB）", status_code=413)
+        except UploadError as e:
+            return error_response(error_text("Base64 解码失败", e), status_code=400)
+        if payload is None:
+            return error_response("未收到文件", status_code=400)
+
+        filename = payload.filename.lower()
+        ext = os.path.splitext(filename)[1].lower()
+        # 处理 .card.png 等特殊扩展名
+        if filename.endswith('.card.png'):
+            ext = '.png'
+        elif ext not in CARD_IMPORT_EXTS:
+            return error_response("不支持的文件格式（支持 PNG/JPG/WebP/JSON）", status_code=400)
+
+        try:
+            is_image = ext in CARD_IMAGE_EXTS
+            persona_data = await asyncio.to_thread(self.persona_manager.parse_v2_card, payload.data, is_image)
+
+            # 如果是图片，保存为头像（头像保存失败不影响角色卡导入）
+            if is_image:
+                try:
+                    avatar_filename = f"{persona_data['name']}{ext}"
+                    avatar_path = await self.persona_manager.save_avatar(avatar_filename, payload.data)
+                    persona_data["avatar_path"] = avatar_path
+                except Exception as av_e:
+                    logger.warning(f"[Quill] 头像保存失败（角色卡仍会导入）: {av_e}")
+
+            result = await self.persona_manager.create_persona(persona_data)
+            return json_response(result)
+
+        except ImportError as e:
+            return error_response(str(e), status_code=501)
+        except ValueError as e:
+            return error_response(str(e), status_code=400)
+        except Exception as e:
+            return error_response(error_text("导入失败", e), status_code=500)
+
+    @_api_handler
+    async def persona_export(self):
+        """导出 V2 角色卡。"""
+        if not self.persona_manager:
+            return error_response("角色卡管理器未加载", status_code=500)
+
+        persona_id = (request.query.get("id") or "").strip()
+        if not persona_id:
+            return error_response("缺少角色 ID", status_code=400)
+
+        persona = await self.persona_manager.get_persona(persona_id)
+        if not persona:
+            return error_response("角色卡不存在", status_code=404)
+
+        try:
+            # 尝试读取头像
+            avatar_data = None
+            avatar_path = persona.get("avatar_path", "")
+            if avatar_path and avatar_path.startswith("quill_avatars/"):
+                avatar_filename = os.path.basename(avatar_path)
+                avatar_data = await self.persona_manager.read_avatar(avatar_filename)
+
+            # 导出为 V2（PIL 图片编码为同步 CPU 操作，放线程池避免阻塞事件循环）
+            export_data = await asyncio.to_thread(
+                self.persona_manager.export_v2_card, persona, avatar_data
+            )
+
+            # 返回文件下载（P3-5 修复：file_response 仅支持路径，bytes 需用 Response + 下载头）
+            if avatar_data:
+                return Response(
+                    export_data,
+                    media_type="image/png",
+                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{_urlquote(persona['name'])}_v2.png"}
+                )
+            else:
+                return Response(
+                    export_data,
+                    media_type="application/json",
+                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{_urlquote(persona['name'])}_v2.json"}
+                )
+
+        except ImportError as e:
+            return error_response(str(e), status_code=501)
+        except Exception as e:
+            return error_response(error_text("导出失败", e), status_code=500)
+
+    @_api_handler
+    async def serve_avatar(self, filename: str):
+        """提供头像文件静态服务。"""
+        if not self.persona_manager:
+            return error_response("管理器未加载", status_code=500)
+
+        # 安全检查（M3.1）：原手工 '..'、'/'、'\\' 三连检查收敛为
+        # sanitize_name 规整比对——任何会被规整改写的名字（分隔符、..、
+        # 控制字符、Windows 保留名、首尾空白）一律 400。
+        # 对比基准用 fallback=""：空输入同样落入"无效"分支。
+        if not filename or sanitize_name(filename, fallback="") != filename:
+            return error_response("无效的文件名", status_code=400)
+
+        data = await self.persona_manager.read_avatar(filename)
+        if not data:
+            return error_response("文件未找到", status_code=404)
+
+        # 根据扩展名设置 MIME 类型
+        ext = os.path.splitext(filename)[1].lower()
+        mime_map = {
+            '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+            '.webp': 'image/webp', '.gif': 'image/gif'
+        }
+        mime = mime_map.get(ext, 'application/octet-stream')
+
+        return Response(
+            data,
+            media_type=mime,
+            headers={"Cache-Control": "public, max-age=86400"}
+        )
+
+    @_api_handler
+    async def persona_import_text(self):
+        """从剪贴板文本导入角色卡（text 直传 / b64_text 绕沙箱，M3.1 收敛）。
+
+        ``/persona/import_text``（text 字段）与 ``/persona/import_text_base64``
+        （b64_text 字段，面板 bridge 通道）共用同一 handler。
+        """
+        if not self.persona_manager:
+            return error_response("角色卡管理器未加载", status_code=500)
+        data = await _json_body()
+        text = (data.get("text") or "").strip()
+        if not text:
+            # 沙箱 bridge 通道：文本以 Base64 编码放 b64_text 字段传输
+            b64_text = (data.get("b64_text") or "").strip()
+            if b64_text:
+                try:
+                    text = decode_base64(b64_text).decode('utf-8')
+                except Exception as e:
+                    return error_response(error_text("Base64 解码失败", e), status_code=400)
+        if not text:
+            return error_response("缺少 text 参数", status_code=400)
+        try:
+            persona_data = self.persona_manager.parse_clipboard_text(text)
+            result = await self.persona_manager.create_persona(persona_data)
+            return json_response(result)
+        except ValueError as e:
+            return error_response(str(e), status_code=400)
+        except Exception as e:
+            return error_response(error_text("解析失败", e), status_code=400)
+
+    @_api_handler
+    async def persona_export_base64(self):
+        """导出 V2 角色卡（Base64 编码，突破沙盒下载限制）。"""
+        if not self.persona_manager:
+            return error_response("角色卡管理器未加载", status_code=500)
+        data = await _json_body()
+        persona_id = (data.get("id") or "").strip()
+        if not persona_id:
+            return error_response("缺少角色 ID", status_code=400)
+        persona = await self.persona_manager.get_persona(persona_id)
+        if not persona:
+            return error_response("角色卡不存在", status_code=404)
+        try:
+            import os
+            import base64
+            avatar_data = None
+            avatar_path = persona.get("avatar_path", "")
+            if avatar_path and avatar_path.startswith("quill_avatars/"):
+                avatar_filename = os.path.basename(avatar_path)
+                avatar_data = await self.persona_manager.read_avatar(avatar_filename)
+            export_data = await asyncio.to_thread(
+                self.persona_manager.export_v2_card, persona, avatar_data
+            )
+            filename = f"{persona['name']}_v2.png" if avatar_data else f"{persona['name']}_v2.json"
+            b64_str = base64.b64encode(export_data).decode('ascii')
+            return json_response({"filename": filename, "b64_data": b64_str})
+        except Exception as e:
+            return error_response(error_text("导出失败", e), status_code=500)
+
+    async def _build_backup_zip(self) -> tuple[bytes, str, int, list[str]]:
+        """Build one consistent zip snapshot from plugin data directories.
+
+        数据库文件走 SQLite 在线备份 API 生成一致快照（WAL 中未 checkpoint 的
+        已提交事务也包含在内），而不是裸拷主文件——否则热备会静默丢掉最近提交
+        （实测出现过「备份里 0 条记忆，实际 2 条」）。快照失败时退回裸拷并把原因
+        记入 warnings，交由调用方透出，不静默降级。
+
+        归档范围由 _paths.backup_sources 决定：数据根就位后整根打包
+        （knowledge/、worldbooks/、状态文件落在顶层），旧布局则维持
+        data/、knowledge/、worldbooks/ 三个目录名的历史格式。
+        """
+        import io
+        import datetime as _dt
+
+        plugin_root = os.path.dirname(os.path.abspath(__file__))
+        paths = getattr(self.plugin, "paths", None) or {}
+        sources = backup_sources(paths, plugin_root)
+        if not sources:
+            raise FileNotFoundError("数据目录不存在")
+
+        buf = io.BytesIO()
+        try:
+            zip_count, warnings = await asyncio.to_thread(build_backup_zip, sources, buf)
+        except Exception as e:
+            # M3.2 D4：备份失败抛 StorageError（六类高频路径之一：backup），
+            # 由上层 @_api_handler 转为 500 信封——与改前未捕获异常路径一致，
+            # 但现在可观测（计数 + 异常链）。
+            note_storage_error("backup", e)
+            raise StorageError(
+                "生成备份归档失败",
+                detail=f"_build_backup_zip: {e}",
+            ) from e
+        for w in warnings:
+            logger.warning("[Quill] 备份快照降级: %s", w)
+        fname = (
+            f"quill_backup_{_dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+        )
+        return buf.getvalue(), fname, zip_count, warnings
+
+    @_api_handler
+    async def backup_export(self):
+        """Export all plugin data as a binary zip download."""
+        if self._maintenance_lock.locked():
+            return error_response("备份/恢复正在进行中，请稍后再试", status_code=409)
+        async with self._maintenance_lock:
+            try:
+                raw, fname, zip_count, warnings = await self._build_backup_zip()
+            except FileNotFoundError as e:
+                return error_response(str(e), status_code=404)
+        logger.info(f"[Quill] 全量备份导出: {zip_count} 个文件")
+        return Response(
+            raw,
+            media_type="application/zip",
+            headers={"Content-Disposition": f"attachment; filename={fname}"},
+        )
+
+    @_api_handler
+    async def backup_export_base64(self):
+        """Return a zip snapshot as JSON for sandboxed Plugin Page downloads."""
+        import base64
+        if self._maintenance_lock.locked():
+            return error_response("备份/恢复正在进行中，请稍后再试", status_code=409)
+        async with self._maintenance_lock:
+            try:
+                raw, filename, count, warnings = await self._build_backup_zip()
+            except FileNotFoundError as e:
+                return error_response(str(e), status_code=404)
+        logger.info("[Quill] 全量备份导出(Base64): %d 个文件", count)
+        payload = {
+            "filename": filename,
+            "b64_data": base64.b64encode(raw).decode("ascii"),
+            "size": len(raw),
+        }
+        if warnings:
+            payload["warnings"] = warnings
+        return json_response(payload)
+
+    @_api_handler
+    async def backup_restore(self):
+        """P2-3: 从备份 zip 恢复数据（原始二进制上传）。
+
+        审查修复版：
+        - zip slip 防护统一为"白名单前缀 + normpath 边界校验 + 以校验后的
+          dest 为落点手写文件"（此前校验 dest 却用 zf.extract 按原名解压，
+          两套路径逻辑不一致）；目录白名单限定 data/ knowledge/ worldbooks/，
+          防止覆盖插件源码。
+        - 恢复前先由 plugin._reload_after_restore 关闭旧 DB 句柄并停 autoflush
+          （否则 Windows 下覆盖运行中的 SQLite 会读到错乱页，且旧内存态会把
+          恢复的 quill_state.json 反向覆盖回去）。
+        - 逐文件容错：单个文件失败不中断整体恢复，失败数如实返回。
+        """
+        # 先按 Content-Length 拒一次，避免为了报「过大」而先把整个请求体读进内存。
+        declared = _declared_length(request)
+        if declared is not None and declared > _MAX_RESTORE_BYTES:
+            return error_response(
+                f"备份文件过大（最大 {_MAX_RESTORE_BYTES // (1024 * 1024)}MB）",
+                status_code=413,
+            )
+        raw = await request.body()
+        if not raw:
+            return error_response("请上传备份文件", status_code=400)
+        if self._maintenance_lock.locked():
+            return error_response("备份/恢复正在进行中，请稍后再试", status_code=409)
+        async with self._maintenance_lock:
+            return await self._do_restore_bytes(raw)
+
+    @_api_handler
+    async def backup_restore_base64(self):
+        """P2-3: 从备份 zip 恢复数据（Base64 JSON 模式）。
+
+        面板 iframe 是无 allow-same-origin 的受限沙箱，无法携带 Dashboard
+        认证直连 fetch——前端统一走 bridge（JSON）上传，此端点为此而设。
+        """
+        import base64
+        data = await _json_body()
+        b64 = (data.get("b64_data") or "").strip()
+        if not b64:
+            return error_response("缺少 b64_data 字段", status_code=400)
+        try:
+            raw = base64.b64decode(b64)
+        except Exception:
+            return error_response("Base64 解码失败", status_code=400)
+        if self._maintenance_lock.locked():
+            return error_response("备份/恢复正在进行中，请稍后再试", status_code=409)
+        async with self._maintenance_lock:
+            return await self._do_restore_bytes(raw)
+
+    async def _do_restore_bytes(self, raw: bytes):
+        import io
+        import zipfile
+        plugin_root = os.path.dirname(os.path.abspath(__file__))
+        paths = getattr(self.plugin, "paths", None) or {}
+
+        # M6.2：恢复包上限。此前 body/base64 无任何体积约束，配合下面的
+        # 全量 CRC 校验，一个高压缩比的小包就能撑爆内存 + 冻结事件循环。
+        if len(raw) > _MAX_RESTORE_BYTES:
+            return error_response(
+                f"备份文件过大（最大 {_MAX_RESTORE_BYTES // (1024 * 1024)}MB）",
+                status_code=413,
+            )
+
+        # Fully validate the archive before touching live databases or
+        # stopping autoflush. A corrupt/irrelevant zip must not evict runtime
+        # state or overwrite existing data.
+        #
+        # M6.2：校验（testzip 会对整包逐条 CRC 解压 + 每个 .db 读头嗅探）是
+        # CPU/IO 密集操作，此前直接在事件循环上跑 —— 校验期间台 bot 的所有
+        # 聊天管道与面板请求一起卡住。这里整体丢进线程池；函数只读 raw 与本
+        # 地文件，不碰任何共享状态，线程安全。
+        def _validate() -> list:
+            candidates: list = []
+            bad_db: list[str] = []
+            with zipfile.ZipFile(io.BytesIO(raw), "r") as zf:
+                bad_file = zf.testzip()
+                if bad_file:
+                    raise ValueError(f"备份文件损坏: {bad_file}")
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+                    # 归档条目名 -> 数据根下的绝对落点（同时过滤路径穿越与非法前缀）
+                    dest = resolve_archive_dest(paths, plugin_root, info.filename)
+                    if dest is None:
+                        continue
+                    candidates.append((info, dest))
+                    # 覆盖在线库前先确认归档里确实是 SQLite 文件：把非数据库
+                    # 字节写进 quill_wr.db 会直接毁掉现有数据。只读头部若干字节，
+                    # 不必把整个条目解压进内存。
+                    if dest.endswith(".db"):
+                        with zf.open(info) as fh:
+                            if not is_sqlite_bytes(fh.read(16)):
+                                bad_db.append(info.filename)
+            if bad_db:
+                raise ValueError(
+                    "备份中的数据库文件已损坏，拒绝恢复: " + ", ".join(bad_db)
+                )
+            return candidates
+
+        try:
+            candidates = await asyncio.to_thread(_validate)
+        except ValueError as e:
+            return error_response(str(e), status_code=400)
+        except (zipfile.BadZipFile, OSError) as e:
+            return error_response(error_text("无效的备份文件", e), status_code=400)
+        if not candidates:
+            return error_response("备份中没有可恢复的数据文件", status_code=400)
+
+        extracted_count = 0
+        skipped_count = 0
+        failed_files: list[str] = []
+        stale_sidecars: list[str] = []
+
+        def _extract():
+            nonlocal extracted_count, skipped_count
+            with zipfile.ZipFile(io.BytesIO(raw), 'r') as zf:
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+                    dest = resolve_archive_dest(paths, plugin_root, info.filename)
+                    # 非数据条目（例如归档里混入 .py）一律跳过，绝不写插件代码
+                    if dest is None:
+                        skipped_count += 1
+                        continue
+                    name = info.filename.replace("\\", "/")
+                    try:
+                        os.makedirs(os.path.dirname(dest), exist_ok=True)
+                        # 覆盖数据库前先删掉上一次运行留下的 -wal/-shm/-journal：
+                        # 旧 WAL 记录的是**旧库**的页，SQLite 重开恢复后的主文件时
+                        # 会把它当成自己的日志重放，静默回退/损坏刚恢复的数据。
+                        if dest.endswith(".db"):
+                            stale_sidecars.extend(remove_sidecars(dest))
+                        # 以校验后的 dest 为落点手写（不使用 zf.extract 的自有路径逻辑）
+                        with open(dest, "wb") as f:
+                            f.write(zf.read(info))
+                        extracted_count += 1
+                    except OSError as e:
+                        failed_files.append(name)
+                        logger.warning("[Quill] 备份恢复: 写入 %s 失败: %s", name, e)
+
+        # 顺序关键：先停 autoflush + 关闭持有 DB 句柄的组件，再覆盖文件
+        plugin = self.plugin
+        if plugin is not None and hasattr(plugin, "_prepare_for_restore"):
+            try:
+                await plugin._prepare_for_restore()
+            except Exception as e:
+                note_storage_error("restore", e)
+                logger.warning("[Quill] 备份恢复前组件关闭失败: %s", e, exc_info=True)
+
+        # 解压失败（zip 条目 CRC 损坏 / 加密等）也必须走到重建：_prepare_for_restore
+        # 已经把 wr_manager 置 None，若在此中断，组件会一直停在「已准备」状态，
+        # 面板与聊天路径直到重启都不可用。
+        extract_error = None
+        try:
+            await asyncio.to_thread(_extract)
+        except Exception as e:
+            extract_error = e
+            note_storage_error("restore", e)
+            logger.warning("[Quill] 备份恢复: 解压中断: %s", e, exc_info=True)
+        logger.info(
+            f"[Quill] 备份恢复: 解压 {extracted_count} 个文件, "
+            f"跳过 {skipped_count} 个, 失败 {len(failed_files)} 个"
+        )
+        if stale_sidecars:
+            logger.info(
+                "[Quill] 备份恢复: 已清理 %d 个陈旧数据库 sidecar", len(stale_sidecars)
+            )
+
+        # 解压完成 → 全量重建数据组件 → 刷新 Web 路由引用
+        plugin = self.plugin
+        reload_ok = False
+        if plugin is not None and hasattr(plugin, "_reload_after_restore"):
+            try:
+                await plugin._reload_after_restore()
+                reload_ok = True
+            except Exception as e:
+                note_storage_error("restore", e)
+                logger.warning("[Quill] 备份恢复后组件重建失败: %s", e, exc_info=True)
+
+        msg = f"已恢复 {extracted_count} 个文件（跳过 {skipped_count} 个）"
+        if failed_files:
+            msg += f"；{len(failed_files)} 个文件写入失败（详见服务端日志）"
+        if extract_error is not None:
+            msg += f"；解压中断（{type(extract_error).__name__}），数据可能不完整，建议重新恢复"
+        if not reload_ok:
+            msg += "；组件热重载失败，建议重启 AstrBot 或重载插件"
+        return json_response({
+            "status": "ok",
+            "data": {
+                "extracted": extracted_count,
+                "skipped": skipped_count,
+                "failed": len(failed_files),
+                "reload_ok": reload_ok,
+                "message": msg,
+            }
+        })

@@ -1,0 +1,100 @@
+{
+  "log_with_bot_id": false,
+  "runtime": {
+    "llm_max_concurrency": 0,
+    "state_retention_days": 7
+  },
+  "time_awareness": {
+    "time_guidance_enabled": true,
+    "time_sensors": [
+      "lunar"
+    ],
+    "last_chat_enabled": true,
+    "use_astrbot_timezone": true,
+    "timezone": "Asia/Shanghai",
+    "workday_state_enabled": false,
+    "lunar_state_enabled": true,
+    "almanac_enabled": false
+  },
+  "daily_schedule": {
+    "enable_schedule": false,
+    "schedule_templates": [],
+    "ai_daily": {
+      "enabled": false,
+      "provider_id": "",
+      "use_persona": true,
+      "worldview": "",
+      "max_attempts": 3,
+      "generation_time": "00:05",
+      "max_slots": 24,
+      "retention_days": 30,
+      "ai_priority_over_static": false,
+      "random_weather_enabled": false,
+      "weather_pool": [
+        "晴,30",
+        "多云,25",
+        "阴,15",
+        "小雨,10",
+        "雷阵雨,5",
+        "大风,4",
+        "雾,3"
+      ],
+      "adaptive": {
+        "enabled": false,
+        "recent_days": 0,
+        "theme_pool": [
+          "演习日",
+          "远征日",
+          "港区休整日",
+          "外出日",
+          "宅家日",
+          "社交日",
+          "学习日",
+          "购物日",
+          "整理日",
+          "休闲漫游日",
+          "低能量恢复日",
+          "特别纪念日"
+        ],
+        "style_pool": [
+          "慵懒",
+          "活力",
+          "优雅",
+          "俏皮",
+          "温柔",
+          "冷峻",
+          "元气",
+          "随性",
+          "沉稳",
+          "浪漫"
+        ],
+        "allow_custom_theme": true,
+        "state_continuity_enabled": false,
+        "candidate_count": 1,
+        "candidate_selection": "heuristic",
+        "context_token_budget": null,
+        "max_concurrent_llm": 1,
+        "acquire_timeout_seconds": 10
+      }
+    }
+  },
+  "calendar": {
+    "enable_calendar": true,
+    "ai_generate_provider_id": "",
+    "ai_generate_worldview": "",
+    "ai_generate_max_events": 40,
+    "builtin_event_categories": [
+      "legal_holidays",
+      "traditional",
+      "solar_terms"
+    ],
+    "enable_builtin_events": true,
+    "builtin_events": {
+      "legal_holidays": true,
+      "traditional": true,
+      "solar_terms": true,
+      "political": false,
+      "international": false
+    }
+  }
+}

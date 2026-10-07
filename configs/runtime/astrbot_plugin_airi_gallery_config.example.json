@@ -1,0 +1,27 @@
+{
+  "view_command_mode": "prefix",
+  "view_multiple_mode": "single",
+  "view_multiple_max": 5,
+  "llm_tool_enabled": true,
+  "upload_token": "",
+  "cloud_gallery_url": "",
+  "category_aliases": [
+    "自拍=林小满",
+    "小满=林小满",
+    "满满=林小满",
+    "老婆=林小满"
+  ],
+  "view_all_collage_compress": false,
+  "view_all_collage_scale": 0.85,
+  "use_permission": true,
+  "admins": [],
+  "whitelist": [],
+  "git_sync_enabled": false,
+  "git_platform": "github",
+  "git_repo_owner": "",
+  "git_repo_name": "",
+  "git_branch": "main",
+  "git_token": "",
+  "git_push_batch_size": 50,
+  "git_sync_interval": 5
+}

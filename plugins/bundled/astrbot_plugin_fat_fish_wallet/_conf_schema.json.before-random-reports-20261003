@@ -1,0 +1,124 @@
+{
+  "enabled": {
+    "description": "总开关",
+    "type": "bool",
+    "default": true
+  },
+  "timezone": {
+    "description": "时区（IANA 名称）",
+    "type": "string",
+    "default": "Asia/Shanghai"
+  },
+  "peak_periods": {
+    "description": "高峰时段，如 09:00-12:00,14:00-18:30",
+    "type": "string",
+    "default": "09:00-12:00,14:00-18:30"
+  },
+  "peak_weekdays": {
+    "description": "生效星期，0=周一…6=周日，留空=每天",
+    "type": "string",
+    "default": "0,1,2,3,4,5,6"
+  },
+  "affected_providers": {
+    "description": "要拦截的供应商匹配词，* 表示全部",
+    "type": "string",
+    "default": "deepseek"
+  },
+  "gate_when_provider_unknown": {
+    "description": "识别不到供应商时也拦截",
+    "type": "bool",
+    "default": true
+  },
+  "admins_bypass": {
+    "description": "管理员豁免拦截",
+    "type": "bool",
+    "default": true
+  },
+  "attach_images": {
+    "description": "回复附带图片",
+    "type": "bool",
+    "default": true
+  },
+  "peak_image": {
+    "description": "高峰提示图片（assets 下）",
+    "type": "string",
+    "default": "高峰时段.png"
+  },
+  "offpeak_image": {
+    "description": "空闲提示图片（assets 下）",
+    "type": "string",
+    "default": "空闲时段.png"
+  },
+  "peak_msg_enter": {
+    "description": "进入高峰提示，支持 {provider} {time}",
+    "type": "text",
+    "default": "已进入高峰时段，{provider} 高峰时段费用太贵，该时段将停止服务至空闲时段，到时自动恢复。"
+  },
+  "peak_msg_steady": {
+    "description": "高峰持续提示，支持 {provider} {time}",
+    "type": "text",
+    "default": "当前处于高峰时段，{provider} 费用太贵，服务已暂停，空闲时段自动恢复。"
+  },
+  "offpeak_msg": {
+    "description": "恢复服务提示，支持 {provider} {time}",
+    "type": "text",
+    "default": "已到达空闲时段，服务恢复，可以正常使用了。"
+  },
+  "manual_block_msg": {
+    "description": "手动暂停提示",
+    "type": "text",
+    "default": "服务已被管理员手动关闭（拦截），等待恢复。"
+  },
+  "manual_override": {
+    "description": "手动开关：auto/always_allow(放行)/always_block(拦截)",
+    "type": "string",
+    "options": ["auto", "always_allow", "always_block"],
+    "default": "auto"
+  },
+  "announce_transition": {
+    "description": "时段切换时发提示",
+    "type": "bool",
+    "default": true
+  },
+  "private_notify_mode": {
+    "description": "私信高峰提示频率：once=每天一次/always=每次/never=不提示",
+    "type": "string",
+    "options": ["once", "always", "never"],
+    "default": "once"
+  },
+  "whitelist_users": {
+    "description": "初始白名单用户（用 /白名单 管理）",
+    "type": "list",
+    "default": []
+  },
+  "whitelist_groups": {
+    "description": "初始白名单群（用 /白名单 管理）",
+    "type": "list",
+    "default": []
+  },
+  "reminder_enabled": {
+    "description": "时段自动提醒",
+    "type": "bool",
+    "default": true
+  },
+  "reminder_targets": {
+    "description": "提醒目标：留空=自动记录的所有群；也可填群号/完整消息来源（如 aiocqhttp:GroupMessage:123）",
+    "type": "list",
+    "default": []
+  },
+  "reminder_lead_minutes": {
+    "description": "高峰开始前提前提醒的分钟数",
+    "type": "int",
+    "default": 5
+  },
+  "reminder_peak_msg": {
+    "description": "高峰即将到来提醒，支持 {time}",
+    "type": "text",
+    "default": "提醒：高峰时段即将到来（约 {time}），过几分钟将暂停模型服务。"
+  },
+  "reminder_offpeak_msg": {
+    "description": "空闲到来提醒，支持 {time}",
+    "type": "text",
+    "default": "提醒：已到达空闲时段，模型服务恢复，可以正常使用了。"
+  }
+}

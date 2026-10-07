@@ -1,0 +1,78 @@
+{
+  "config_mode": "专业模式",
+  "simple_settings": {
+    "enable_split": false,
+    "max_segments_simple": 3,
+    "send_speed": "自然",
+    "protect_emoji": true,
+    "image_handling": "跟文字一起",
+    "enable_reply_simple": false,
+    "enable_proactive_split_simple": false,
+    "remove_texts_simple": []
+  },
+  "advanced_settings": {
+    "enable_group_split_adv": false,
+    "enable_proactive_split_adv": false,
+    "split_scope_adv": "仅AI回复",
+    "split_chars_adv": [
+      "\n"
+    ],
+    "no_split_around_adv": [],
+    "max_segments_adv": 3,
+    "balanced_split_adv": false,
+    "clean_before_items_adv": [],
+    "clean_after_items_adv": [],
+    "inject_kaomoji_prompt_adv": false,
+    "replace_rules_adv": [],
+    "reverse_replace_adv": false,
+    "send_speed_adv": "自然",
+    "image_strategy_adv": "单独",
+    "conversation_blacklist_adv": [],
+    "conversation_whitelist_adv": []
+  },
+  "basic_settings": {
+    "enable_group_split": true,
+    "enable_proactive_split": false,
+    "split_scope": "llm_only",
+    "max_length_no_split": 10,
+    "max_length_to_disable": 0,
+    "conversation_blacklist": [],
+    "conversation_whitelist": []
+  },
+  "split_settings": {
+    "split_regex": "[。！？?!\\n]+",
+    "no_split_around": [],
+    "enable_smart_split": true,
+    "balanced_split_mode": false,
+    "max_segments": 6,
+    "min_segment_length": 4,
+    "balanced_split_ratio_min": 0.5,
+    "balanced_split_ratio_max": 0.9,
+    "trim_segment_edge_blank_lines": true
+  },
+  "clean_settings": {
+    "clean_before_regex": "(?m)^[ \\t]*(?:林小满|小满)[ \\t]*[：:][ \\t]*",
+    "clean_after_regex": "。+(?=\\s*$)",
+    "inject_kaomoji_prompt": false,
+    "replace_rules": [],
+    "reverse_replace": false
+  },
+  "reply_media_settings": {
+    "enable_smart_reply": false,
+    "enable_reply": true,
+    "image_strategy": "跟随下段",
+    "at_strategy": "跟随下段",
+    "face_strategy": "嵌入",
+    "other_media_strategy": "跟随下段"
+  },
+  "delay_settings": {
+    "delay_strategy": "random",
+    "linear_base": 0.5,
+    "linear_factor": 0.1,
+    "log_base": 0.5,
+    "log_factor": 0.8,
+    "random_min": 0.45,
+    "random_max": 1.15,
+    "fixed_delay": 1.2
+  }
+}

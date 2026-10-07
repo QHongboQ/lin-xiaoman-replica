@@ -1,0 +1,1755 @@
+# Copyright (C) 2025 Nana7mi0721
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Business helpers for QuillPlugin commands.
+
+命令入口（@filter.command 装饰的函数）必须定义在 Star 子类所在的模块
+（main.py）里，否则 AstrBot 的 handler 扫描会把它们登记到错误的模块，
+导致指令不被分派。这里只放无装饰器的业务函数，由 main.py 调用。
+"""
+
+import asyncio
+import json
+
+from astrbot.api.event import AstrMessageEvent
+from astrbot.core.message.message_event_result import MessageEventResult
+from astrbot.core.platform.message_type import MessageType
+
+from ._route_core import error_text
+
+from astrbot.api import logger
+
+
+#: `/memory del|pin <序号>` 的序号上限（L5）。序号会被直接当作 SQL ``LIMIT``
+#: 使用（``list_memories(session_id, max(idx, 50))``），不夹的话
+#: `/memory del 999999999` 会把整个会话的记忆全部物化进内存。
+_MAX_MEMORY_INDEX = 1000
+
+#: `/memory list <页码>` 的页码上限（同上，offset 会进 LIMIT）。
+_MAX_MEMORY_PAGE = 200
+
+
+def _get_target_id(event: AstrMessageEvent) -> str:
+    """获取指令作用域 ID（群号或私聊用户ID）"""
+    if hasattr(event, "unified_msg_origin") and event.unified_msg_origin:
+        return str(event.unified_msg_origin)
+    return str(event.get_sender_id())
+
+
+def _check_group_permission(plugin, event: AstrMessageEvent):
+    """群聊写权限校验。私聊始终返回 None（放行）。
+
+    F2 修复：原实现用 `sender_id in target_id` 子串匹配，群号含于用户 ID 时越权。
+    现改为：私聊场景直接放行；群聊仅 admin 放行。
+    S2-5 修复：admin_users 未配置时群聊默认拒绝（fail-close），避免公网裸奔。
+    Bug 修复：AstrBot 所有适配器统一使用 MessageType.FRIEND_MESSAGE 表示私聊，
+    原代码误用字符串 "PrivateMessage" 判断导致私聊永不进入私聊分支。
+
+    P1-9 修复：返回错误消息而非 bool，区分"未配置"与"不在白名单"两种场景，
+    引导用户正确配置。
+    """
+    admin_users = getattr(plugin.config, "admin_users", []) or []
+    sender_id = str(event.get_sender_id())
+    # 私聊：直接放行（与 AstrBot 内置 /reset 策略对齐：私聊默认 member）
+    if event.get_message_type() == MessageType.FRIEND_MESSAGE:
+        return None
+    # 群聊：仅 admin 放行；admin 未配置时 fail-close
+    if not admin_users:
+        logger.warning("[Quill] admin_users 未配置，群聊写操作已拒绝。请在配置面板设置 admin_users（留空时群聊写功能锁定）。")
+        return (
+            "⛔ 群聊中只有管理员可以执行此操作。\n"
+            f"当前 admin_users 未配置，请在插件配置面板 → 权限 → admin_users 中填写你的用户 ID ({sender_id})。"
+        )
+    admin_set = set(str(u) for u in admin_users)
+    if sender_id not in admin_set:
+        return (
+            "⛔ 群聊中只有管理员可以执行此操作。\n"
+            f"你的用户 ID ({sender_id}) 不在 admin_users 白名单中，请联系群主添加。"
+        )
+    return None
+
+
+# ================================================================
+# /wb — 世界书
+# ================================================================
+
+async def wb_dispatch(plugin, event: AstrMessageEvent, arg1: str, arg2: str):
+    """
+    /wb              列表（带序号）
+    /wb bind <序号|名字>   绑定世界书到当前角色卡
+    /wb unbind <序号|名字> 解绑世界书从当前角色卡
+    /wb info <序号|名字>   详情
+    /wb reload       重载全部世界书
+    """
+    if not plugin.wb_manager:
+        event.set_result(MessageEventResult().message("世界书系统未加载"))
+        return
+
+    sub = (arg1 or "").strip().lower()
+
+    if not arg1:
+        await _wb_list(plugin, event)
+        return
+
+    if sub == "bind":
+        if not arg2:
+            event.set_result(MessageEventResult().message("用法: /wb bind <序号|名字>"))
+            return
+        await _wb_bind(plugin, event, arg2.strip())
+        return
+
+    if sub == "unbind":
+        if not arg2:
+            event.set_result(MessageEventResult().message("用法: /wb unbind <序号|名字>"))
+            return
+        await _wb_unbind(plugin, event, arg2.strip())
+        return
+
+    if sub == "info":
+        if not arg2:
+            event.set_result(MessageEventResult().message("用法: /wb info <序号|名字>"))
+            return
+        resolved = _resolve_wb_name(plugin, arg2)
+        await _wb_info(plugin, event, resolved or arg2)
+        return
+
+    if sub == "list":
+        await _wb_list(plugin, event)
+        return
+
+    if sub == "reload":
+        # 重载是全库共享状态的改写（所有会话都会看到新内容），群聊需管理员。
+        msg = _check_group_permission(plugin, event)
+        if msg:
+            event.set_result(MessageEventResult().message(msg))
+            return
+        try:
+            # reload_all 是同步方法（加锁后重新读盘），内部做文件 IO，
+            # 放线程避免阻塞事件循环。
+            await asyncio.to_thread(plugin.wb_manager.reload_all)
+            count = len(plugin.wb_manager.list_worldbooks())
+            event.set_result(MessageEventResult().message(f"已重载全部世界书 ({count} 本)"))
+        except Exception as e:
+            event.set_result(MessageEventResult().message(error_text("重载失败", e)))
+        return
+
+    # 未知子命令
+    event.set_result(MessageEventResult().message(
+        f"未知子命令: {arg1}\n\n"
+        "用法:\n"
+        "  /wb list               列出所有世界书\n"
+        "  /wb bind <序号|名字>   绑定到当前角色\n"
+        "  /wb unbind <序号|名字> 解绑从当前角色\n"
+        "  /wb info <序号|名字>   查看详情\n"
+        "  /wb reload             重新加载"
+    ).use_t2i(False))
+
+
+def _norm_name(text: str) -> str:
+    """归一化名字用于比对：折叠连续空白为单个空格并去首尾。
+
+    AstrBot 的 CommandFilter 会把整条消息里的连续空白压成单空格
+    （`re.sub(r"\\s+", " ", message_str)`），所以用户输入侧已经不可能带
+    连续空格。但**库里的名字可以是任意空白**（例如 "" 这样的双空格），
+    直接字符串相等会让这些名字永远无法通过名字切换/绑定。两侧都做同样的
+    归一化即可对齐。
+    """
+    return " ".join((text or "").split())
+
+
+def _match_name(candidates, wanted: str) -> str | None:
+    """在候选名字里做「归一化后相等」的匹配，先精确后归一化。"""
+    raw = (wanted or "").strip()
+    if not raw:
+        return None
+    for name in candidates:
+        if name == raw:
+            return name
+    target = _norm_name(raw)
+    for name in candidates:
+        if _norm_name(name) == target:
+            return name
+    return None
+
+
+def _resolve_wb_name(plugin, arg: str) -> str | None:
+    """把 '1' / '2' 或名字解析为世界书名。
+
+    纯数字按序号（1-based）解析；非数字做名字匹配（含空白归一化）。
+    两者都未命中时返回 None，由调用方决定如何报错。
+    """
+    if not arg:
+        return None
+    s = arg.strip()
+    books = plugin.wb_manager.list_worldbooks()
+    if s.isdigit():
+        idx = int(s) - 1
+        if 0 <= idx < len(books):
+            return books[idx]
+        return None
+    return _match_name(books, s)
+
+
+async def _wb_bind(plugin, event: AstrMessageEvent, arg: str):
+    """绑定世界书到当前激活的角色卡"""
+    msg = _check_group_permission(plugin, event)
+    if msg:
+        event.set_result(MessageEventResult().message(msg))
+        return
+    target_id = _get_target_id(event)
+
+    # 获取当前激活的角色卡
+    if not hasattr(plugin.state_manager, "get_persona_id"):
+        event.set_result(MessageEventResult().message("角色系统未加载"))
+        return
+
+    persona_id = await plugin.state_manager.get_persona_id(target_id)
+    if not persona_id:
+        event.set_result(MessageEventResult().message("请先激活一个角色卡（使用 /char <序号|名字>）"))
+        return
+
+    # 解析世界书名字
+    name = _resolve_wb_name(plugin, arg) or arg.strip()
+    wb = plugin.wb_manager.get_worldbook(name)
+    if not wb:
+        books = plugin.wb_manager.list_worldbooks()
+        lines = [f"世界书不存在: {arg}", "", "可用世界书："]
+        for i, n in enumerate(books, 1):
+            lines.append(f"  {i}. {n}")
+        event.set_result(MessageEventResult().message("\n".join(lines)).use_t2i(False))
+        return
+
+    # 获取角色卡数据
+    if not plugin.persona_manager:
+        event.set_result(MessageEventResult().message("角色卡管理器未加载"))
+        return
+
+    persona_data = await plugin.persona_manager.get_persona(persona_id)
+    if not persona_data:
+        event.set_result(MessageEventResult().message("角色卡不存在"))
+        return
+
+    # 更新角色卡的绑定列表
+    ext = persona_data.get("quill_extensions", {})
+    bound_worldbooks = ext.get("bound_worldbooks", [])
+    entry_count = len(wb.get("entries", []))
+
+    if name not in bound_worldbooks:
+        bound_worldbooks.append(name)
+        ext["bound_worldbooks"] = bound_worldbooks
+        ext["wb_mode"] = "custom"  # 自动切换到 Custom 模式
+        persona_data["quill_extensions"] = ext
+
+        await plugin.persona_manager.update_persona(persona_id, persona_data)
+        logger.info(f"[Quill] 对话 {target_id} 绑定世界书 '{name}' 到角色卡 '{persona_id}'")
+        event.set_result(MessageEventResult().message(
+            f"已绑定世界书: {name} ({entry_count} 条) → 当前角色"
+        ).use_t2i(False))
+    else:
+        logger.info(f"[Quill] 对话 {target_id} 尝试绑定已绑定的世界书 '{name}' 到角色卡 '{persona_id}'")
+        event.set_result(MessageEventResult().message(
+            f"世界书已绑定: {name} ({entry_count} 条)"
+        ).use_t2i(False))
+
+
+async def _wb_unbind(plugin, event: AstrMessageEvent, arg: str):
+    """解绑世界书从当前激活的角色卡"""
+    msg = _check_group_permission(plugin, event)
+    if msg:
+        event.set_result(MessageEventResult().message(msg))
+        return
+    target_id = _get_target_id(event)
+
+    # 获取当前激活的角色卡
+    if not hasattr(plugin.state_manager, "get_persona_id"):
+        event.set_result(MessageEventResult().message("角色系统未加载"))
+        return
+
+    persona_id = await plugin.state_manager.get_persona_id(target_id)
+    if not persona_id:
+        event.set_result(MessageEventResult().message("请先激活一个角色卡"))
+        return
+
+    # 解析世界书名字
+    name = _resolve_wb_name(plugin, arg) or arg.strip()
+
+    # 获取角色卡数据
+    if not plugin.persona_manager:
+        event.set_result(MessageEventResult().message("角色卡管理器未加载"))
+        return
+
+    persona_data = await plugin.persona_manager.get_persona(persona_id)
+    if not persona_data:
+        event.set_result(MessageEventResult().message("角色卡不存在"))
+        return
+
+    # 更新角色卡的绑定列表
+    ext = persona_data.get("quill_extensions", {})
+    bound_worldbooks = ext.get("bound_worldbooks", [])
+    if name in bound_worldbooks:
+        bound_worldbooks.remove(name)
+        ext["bound_worldbooks"] = bound_worldbooks
+        persona_data["quill_extensions"] = ext
+
+        await plugin.persona_manager.update_persona(persona_id, persona_data)
+        logger.info(f"[Quill] 对话 {target_id} 解绑世界书 '{name}' 从角色卡 '{persona_id}'")
+        event.set_result(MessageEventResult().message(
+            f"已解绑世界书: {name} 从当前角色"
+        ).use_t2i(False))
+    else:
+        logger.info(f"[Quill] 对话 {target_id} 尝试解绑未绑定的世界书 '{name}' 从角色卡 '{persona_id}'")
+        event.set_result(MessageEventResult().message(
+            f"世界书未绑定: {name}"
+        ).use_t2i(False))
+
+
+async def _wb_list(plugin, event: AstrMessageEvent):
+    books = plugin.wb_manager.list_worldbooks()
+    if not books:
+        event.set_result(MessageEventResult().message("没有可用的世界书"))
+        return
+    target_id = _get_target_id(event)
+
+    # 获取当前角色卡绑定的世界书
+    persona_bound: set = set()
+    persona_name = ""
+    persona_mode = "disabled"
+    if hasattr(plugin.state_manager, "get_persona_id"):
+        persona_id = await plugin.state_manager.get_persona_id(target_id)
+        if persona_id and plugin.persona_manager:
+            pdata = await plugin.persona_manager.get_persona(persona_id)
+            if pdata:
+                ext = pdata.get("quill_extensions", {})
+                persona_bound = set(ext.get("bound_worldbooks", []))
+                persona_mode = ext.get("wb_mode", "disabled")
+                persona_name = pdata.get("name", persona_id)
+
+    lines = [f"可用世界书（✓ 已绑定 | 模式: {persona_mode}）："]
+    for i, name in enumerate(books, 1):
+        wb = plugin.wb_manager.get_worldbook(name)
+        # description 未经归一化即可入库（面板创建时可传 JSON null），
+        # .get 的默认值挡不住 None，直接切片会抛 TypeError。
+        desc = (wb.get("description") or "")[:40] if wb else ""
+        entry_count = len(wb.get("entries", [])) if wb else 0
+
+        mark = "✓" if name in persona_bound else " "
+        lines.append(f"  {mark} {i}. {name} ({entry_count} 条) - {desc}")
+
+    if persona_name:
+        lines.append(f"\n当前角色: {persona_name}（模式: {persona_mode}）")
+
+    lines.append("")
+    lines.append("使用: /wb bind <序号|名字>   绑定到当前角色")
+    lines.append("     /wb unbind <序号|名字> 解绑从当前角色")
+    lines.append("     /wb info <序号|名字>   查看详情")
+    lines.append("     /wb reload             重新加载")
+    event.set_result(MessageEventResult().message("\n".join(lines)).use_t2i(False))
+
+
+async def _wb_info(plugin, event: AstrMessageEvent, name: str):
+    wb = plugin.wb_manager.get_worldbook(name)
+    if not wb:
+        event.set_result(MessageEventResult().message(f"世界书不存在: {name}"))
+        return
+    lines = [f"世界书: {name}"]
+    lines.append(f"描述: {wb.get('description', '')}")
+    lines.append(f"条目数: {len(wb.get('entries', []))}")
+    for entry in wb.get("entries", []):
+        status = "常驻" if entry.get("is_constant") else "触发"
+        enabled = "开" if entry.get("enabled", True) else "关"
+        keys = ", ".join(entry.get("keys", [])) if entry.get("keys") else "无"
+        lines.append(f"  [{status}|{enabled}] {entry.get('title', '')} (keys: {keys})")
+    event.set_result(MessageEventResult().message("\n".join(lines)).use_t2i(False))
+
+
+# ================================================================
+# /char — 角色卡
+# ================================================================
+
+async def char_dispatch(plugin, event: AstrMessageEvent, arg: str):
+    """
+    /char             列表（带序号）
+    /char <序号|名字> 切换
+    /char unset       取消角色卡
+    /char info [序号|名字]  查看详情
+    /char export [序号|名字]  导出 JSON
+    /char import <JSON>  从 JSON 导入角色卡
+    """
+    sub_args = (arg or "").strip()
+    parts = sub_args.split(None, 1) if sub_args else []
+    sub = parts[0].lower() if parts else ""
+    rest = parts[1] if len(parts) > 1 else ""
+
+    if not parts:
+        await _char_list(plugin, event)
+        return
+
+    if sub == "list":
+        await _char_list(plugin, event)
+        return
+
+    if sub == "unset":
+        msg = _check_group_permission(plugin, event)
+        if msg:
+            event.set_result(MessageEventResult().message(msg))
+            return
+        target_id = _get_target_id(event)
+        await plugin.state_manager.set_persona_id(target_id, "")
+        event.set_result(MessageEventResult().message("已取消角色卡，将使用默认人设。"))
+        return
+
+    if sub == "info":
+        if not rest:
+            # 查看当前角色
+            target_id = _get_target_id(event)
+            persona_id = await plugin.state_manager.get_persona_id(target_id)
+            if not persona_id:
+                event.set_result(MessageEventResult().message("未绑定角色卡。使用 /char 查看列表。"))
+                return
+            await _char_info(plugin, event, persona_id)
+        else:
+            resolved = await _resolve_persona_id(plugin, rest, event)
+            if resolved is None:
+                return
+            await _char_info(plugin, event, resolved)
+        return
+
+    if sub == "export":
+        if not rest:
+            # 导出当前角色卡
+            target_id = _get_target_id(event)
+            persona_id = await plugin.state_manager.get_persona_id(target_id)
+            if not persona_id:
+                event.set_result(MessageEventResult().message("未绑定角色卡，无法导出。"))
+                return
+            await _char_export(plugin, event, persona_id)
+        else:
+            resolved = await _resolve_persona_id(plugin, rest, event)
+            if resolved is None:
+                return
+            await _char_export(plugin, event, resolved)
+        return
+
+    if sub == "import":
+        msg = _check_group_permission(plugin, event)
+        if msg:
+            event.set_result(MessageEventResult().message(msg))
+            return
+        if not rest:
+            event.set_result(MessageEventResult().message("用法: /char import <角色卡 JSON>"))
+            return
+        await _char_import(plugin, event, rest)
+        return
+
+    # /char <序号|名字> → 切换（需要权限）
+    msg = _check_group_permission(plugin, event)
+    if msg:
+        event.set_result(MessageEventResult().message(msg))
+        return
+
+    resolved = await _resolve_persona_id(plugin, sub_args, event)
+    if resolved is None:
+        return
+
+    personas = await plugin.persona_manager.load_all()
+    matched = None
+    for p in personas:
+        if p.get("id") == resolved:
+            matched = p
+            break
+    if not matched:
+        event.set_result(MessageEventResult().message(
+            f"角色卡不存在: {sub_args}\n发送 /char 查看列表"
+        ))
+        return
+
+    target_id = _get_target_id(event)
+    persona_id = matched.get("id", resolved)
+    await plugin.state_manager.set_persona_id(target_id, persona_id)
+
+    # 统计联动信息
+    wbs = []
+    rag_docs = []
+    if plugin.wb_manager:
+        pext = matched.get("quill_extensions", {})
+        p_wb_mode = pext.get("wb_mode", "disabled")
+        p_bound_worldbooks = pext.get("bound_worldbooks", []) if p_wb_mode == "custom" else None
+        if p_bound_worldbooks is not None:
+            active = plugin.wb_manager.get_active_worldbooks(bound_worldbooks=p_bound_worldbooks)
+            wbs = [w.get("name", "?") for w in active]
+    if matched.get("quill_extensions"):
+        rag_docs = matched["quill_extensions"].get("bound_rag_docs", [])
+
+    msg_parts = [f"已切换到: {matched.get('name', persona_id)}"]
+    link_info = []
+    if wbs:
+        link_info.append(f"{len(wbs)} 本世界书: {', '.join(wbs)}")
+    if rag_docs:
+        link_info.append(f"{len(rag_docs)} 个文档知识库: {', '.join(rag_docs)}")
+    if link_info:
+        msg_parts.append("已自动挂载：")
+        msg_parts.append("；".join(link_info))
+    msg_parts.append("\n对话历史已按角色卡自动隔离，无需手动清理；如需重开本卡剧情用 /quill reset。")
+
+    event.set_result(MessageEventResult().message("\n".join(msg_parts)))
+
+
+async def _char_list(plugin, event: AstrMessageEvent):
+    personas = await plugin.persona_manager.load_all()
+    if not personas:
+        event.set_result(MessageEventResult().message("没有可用的角色卡"))
+        return
+
+    target_id = _get_target_id(event)
+    current_persona_id = await plugin.state_manager.get_persona_id(target_id)
+
+    lines = ["可用角色卡："]
+    for i, p in enumerate(personas, 1):
+        name = p.get("name", p.get("id", "?"))
+        summary = p.get("summary", "")
+        persona_id = p.get("id", "")
+        mark = " ← 当前" if persona_id == current_persona_id and current_persona_id else ""
+        suffix = f" — {summary[:30]}" if summary else ""
+        lines.append(f"  {i}. {name}{suffix}{mark}")
+    lines.append("")
+    lines.append("使用: /char <序号>   快速切换")
+    lines.append("     /char info     查看当前角色卡详情")
+    lines.append("     /char export   导出当前角色卡 JSON")
+    lines.append("     /char unset    取消")
+    event.set_result(MessageEventResult().message("\n".join(lines)).use_t2i(False))
+
+
+async def _char_info(plugin, event: AstrMessageEvent, persona_id: str):
+    pdata = await plugin.persona_manager.get_persona(persona_id)
+    if not pdata:
+        event.set_result(MessageEventResult().message(f"角色卡不存在: {persona_id}"))
+        return
+
+    name = pdata.get("name", persona_id)
+    summary = pdata.get("summary", "")
+    cp = pdata.get("core_prompts", {})
+    personality = cp.get("personality", "")
+    first_msg = cp.get("first_message", "")
+    scenario = cp.get("scenario", "")
+    examples = cp.get("examples_of_dialogue", "")
+
+    lines = [f"【角色卡】{name}"]
+    if summary:
+        lines.append(f"简介：{summary}")
+    if personality:
+        pers_short = personality[:80] + "..." if len(personality) > 80 else personality
+        lines.append(f"人设：{pers_short}")
+    if first_msg:
+        fm_short = first_msg[:60] + "..." if len(first_msg) > 60 else first_msg
+        lines.append(f"开场白：{fm_short}")
+    if scenario:
+        sc_short = scenario[:60] + "..." if len(scenario) > 60 else scenario
+        lines.append(f"场景：{sc_short}")
+    if examples:
+        ex_short = examples[:60] + "..." if len(examples) > 60 else examples
+        lines.append(f"对话示例：{ex_short}")
+
+    # 联动信息
+    ext = pdata.get("quill_extensions", {})
+    wb_names = ext.get("bound_worldbooks", []) if ext else []
+    rag_docs = ext.get("bound_rag_docs", []) if ext else []
+
+    if wb_names or rag_docs:
+        lines.append("\n[联动拓展]")
+        if wb_names:
+            lines.append(f"专属世界书：{', '.join(wb_names)}")
+        if rag_docs:
+            lines.append(f"专属文档知识库：{', '.join(rag_docs)}")
+
+    # 当前生效世界书（基于角色卡绑定）
+    if plugin.wb_manager:
+        ext = pdata.get("quill_extensions", {})
+        wb_mode = ext.get("wb_mode", "disabled")
+        bound_worldbooks = ext.get("bound_worldbooks", []) if wb_mode == "custom" else None
+        if wb_mode != "disabled":
+            active = plugin.wb_manager.get_active_worldbooks(bound_worldbooks=bound_worldbooks)
+            if active:
+                active_names = [w.get("name", "?") for w in active]
+                lines.append(f"当前生效世界书：{', '.join(active_names)}")
+
+    event.set_result(MessageEventResult().message("\n".join(lines)).use_t2i(False))
+
+
+async def _char_export(plugin, event: AstrMessageEvent, persona_id: str):
+    pdata = await plugin.persona_manager.get_persona(persona_id)
+    if not pdata:
+        event.set_result(MessageEventResult().message(f"角色卡不存在: {persona_id}"))
+        return
+
+    # 导出为可复制的 JSON（清理内部字段）
+    export_data = {
+        "name": pdata.get("name", ""),
+        "summary": pdata.get("summary", ""),
+        "core_prompts": pdata.get("core_prompts", {}),
+        "quill_extensions": pdata.get("quill_extensions", {}),
+    }
+    json_str = json.dumps(export_data, ensure_ascii=False, indent=2)
+
+    lines = [
+        f"【{pdata.get('name', persona_id)}】角色卡 JSON（复制下方内容后用 /char import 导入）：",
+        "```json",
+        json_str,
+        "```",
+    ]
+    event.set_result(MessageEventResult().message("\n".join(lines)).use_t2i(False))
+
+
+async def _char_import(plugin, event: AstrMessageEvent, json_text: str):
+    # 清理可能的 markdown 代码块包裹
+    cleaned = json_text.strip()
+    if cleaned.startswith("```json"):
+        cleaned = cleaned[7:]
+    elif cleaned.startswith("```"):
+        cleaned = cleaned[3:]
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3]
+    cleaned = cleaned.strip()
+
+    # 从文本中提取 JSON（可能混有其他文字）
+    # 尝试找到第一个 { 到最后一个 }
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        event.set_result(MessageEventResult().message("未在输入中找到有效的 JSON 对象。"))
+        return
+    json_str = cleaned[start:end + 1]
+
+    try:
+        data = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        event.set_result(MessageEventResult().message(f"JSON 解析失败: {e}"))
+        return
+
+    # L1：非对象 JSON 直接判为格式错误。json_str 由「首个 { 到末个 }」截取，
+    # 正常不会走到这里，但显式兜住比让 AttributeError 冒到框架层好。
+    if not isinstance(data, dict):
+        event.set_result(MessageEventResult().message("角色卡 JSON 顶层必须是对象 {...}"))
+        return
+    # L1：`data.get("name", default)` 的默认值只在**键缺失**时生效，
+    # `{"name": ""}` 会原样落空串并最终报含糊的「导入失败」。改用 `or` 取默认值。
+    data["name"] = (data.get("name") or "").strip() or "导入的角色"
+
+    try:
+        result = await plugin.persona_manager.create_persona(data)
+        name = result.get("name", data["name"])
+        event.set_result(MessageEventResult().message(
+            f"角色卡导入成功！名称: {name}\n使用 /char {name} 切换到新角色。"
+        ))
+    except Exception as e:
+        event.set_result(MessageEventResult().message(error_text("导入失败", e)))
+
+
+async def _resolve_persona_id(plugin, arg: str, event: AstrMessageEvent) -> str | None:
+    """解析序号或名字为 persona_id。解析失败时直接发送错误消息并返回 None。"""
+    personas = await plugin.persona_manager.load_all()
+    name = arg.strip()
+
+    # 序号
+    if name.isdigit():
+        idx = int(name) - 1
+        if 0 <= idx < len(personas):
+            return personas[idx].get("id", personas[idx].get("name", ""))
+        event.set_result(MessageEventResult().message(
+            f"序号超出范围: {arg}\n发送 /char 查看列表"
+        ))
+        return None
+
+    # 按 id 或 name 匹配（id 先精确；name 走归一化，兼容库里名字含连续空格）
+    for p in personas:
+        if p.get("id") == name:
+            return p.get("id", name)
+    names = [p.get("name") for p in personas if p.get("name")]
+    matched_name = _match_name(names, name)
+    if matched_name is not None:
+        for p in personas:
+            if p.get("name") == matched_name:
+                return p.get("id", matched_name)
+
+    event.set_result(MessageEventResult().message(
+        f"角色卡不存在: {arg}\n发送 /char 查看列表"
+    ))
+    return None
+
+
+# ================================================================
+# /quill — 状态总览 / 多系统测试 / 速查帮助
+# ================================================================
+
+async def quill_help(event: AstrMessageEvent):
+    """P0-3: 折叠式指令速查 — 按五大系统分组，聊天窗口内可读。
+
+    行尾 🔒 = 写操作，群聊需管理员（私聊一律放行）。标记必须与
+    `_check_group_permission` 的实际调用点同步，否则帮助与行为漂移。
+    """
+    lines = [
+        "━━━ 羽笔 QuillPlus 指令速查 ━━━",
+        "",
+        "【🎭 角色卡 /char】",
+        "  /char              列出所有角色卡",
+        "  /char <序号|名字>   切换角色  🔒",
+        "  /char unset        取消当前角色  🔒",
+        "  /char info [序号|名字]  角色详情",
+        "  /char export [序号|名字]  导出 V2 卡",
+        "  /char import <JSON>  导入 V2 卡  🔒",
+        "",
+        "【📖 世界书 /wb】",
+        "  /wb                列出所有世界书",
+        "  /wb bind <序号|名字>  绑定到当前角色  🔒",
+        "  /wb unbind <序号|名字> 解绑从当前角色  🔒",
+        "  /wb info <序号|名字>  世界书详情",
+        "  /wb reload         重载世界书  🔒",
+        "",
+        "【🧠 动态记忆 /memory】",
+        "  /memory            记忆统计",
+        "  /memory list [页码]  记忆列表",
+        "  /memory del <序号>  删除记忆  🔒",
+        "  /memory clear      清空当前会话记忆  🔒",
+        "  /memory learn [内容] 手动添加/增量总结  🔒",
+        "  /memory search <词>  搜索记忆",
+        "  /memory pin <序号> [on|off]  钉住/取消核心记忆  🔒",
+        "  /memory core <内容> 直接写入核心记忆（不参与遗忘）  🔒",
+        "",
+        "【📄 文档RAG /doc】",
+        "  /doc list          文档列表",
+        "  /doc bind <序号>    绑定到当前角色  🔒",
+        "  /doc unbind <序号>  解绑从当前角色  🔒",
+        "  /doc search <关键词>  检索文档",
+        "  /doc reload        重载索引  🔒",
+        "",
+        "【⚙️ 系统 /quill】",
+        "  /quill             系统总览（五库状态 + 健康度）",
+        "  /quill help        本帮助",
+        "  /quill debug       注入构成、匹配详情、会话状态、降级链命中分布  🔒",
+        "  /quill reset       重开本角色卡剧情（清对话+日志，保留长期记忆）  🔒",
+        "  /quill statusbar [on|off|auto]  状态栏开关（仅本会话；不带参数看当前生效值）",
+        "  /quill test <wr|wb|mem> <文字>  测试检索命中",
+        "  /stream [on|off|auto]  流式模式开关（不带参数看当前值）",
+        "  /reinject          重置注入状态，下次激活重新注入全部常驻素材  🔒",
+        "",
+        "━━━ 🔒 = 写操作，群聊需管理员（私聊不受限）━━━",
+        "━━━ 白名单在插件配置·权限 admin_users，留空时群聊写指令全部拒绝 ━━━",
+    ]
+    event.set_result(MessageEventResult().message("\n".join(lines)).use_t2i(False))
+
+
+async def quill_status(plugin, event: AstrMessageEvent):
+    """Quill 系统总览 — 覆盖五大系统状态"""
+    target_id = _get_target_id(event)
+    lines = ["[Quill 运行状态]"]
+
+    # 角色卡
+    persona_id = await plugin.state_manager.get_persona_id(target_id) if hasattr(plugin.state_manager, "get_persona_id") else ""
+    persona_name = ""
+    wb_count = 0
+    if persona_id and plugin.persona_manager:
+        pdata = await plugin.persona_manager.get_persona(persona_id)
+        persona_name = pdata.get("name", persona_id) if pdata else persona_id
+        if plugin.wb_manager:
+            ext = pdata.get("quill_extensions", {})
+            p_wb_mode = ext.get("wb_mode", "disabled")
+            p_bound_worldbooks = ext.get("bound_worldbooks", []) if p_wb_mode == "custom" else None
+            if p_bound_worldbooks is not None:
+                wb_count = len(plugin.wb_manager.get_active_worldbooks(bound_worldbooks=p_bound_worldbooks))
+
+    if persona_name:
+        lines.append(f"  角色：{persona_name} (已绑 {wb_count} 本世界书)")
+    else:
+        lines.append("  角色：默认")
+
+    # 流式模式
+    state = await plugin.state_manager.get_state(target_id)
+    lines.append(f"  流式模式：{state.stream_mode}")
+
+    # 写作素材库
+    if plugin.wr_manager:
+        try:
+            stats = await plugin.wr_manager.get_stats()
+            ext_info = ""
+            if persona_id and plugin.persona_manager and pdata:
+                ext = pdata.get("quill_extensions", {})
+                wr_cats = ext.get("bound_writing_resource", []) if ext else []
+                if wr_cats:
+                    ext_info = f" (仅限: {', '.join(wr_cats)})"
+            lines.append(f"  写作素材库: {stats['total_entries']} 条启用{ext_info}")
+        except Exception:
+            lines.append("  写作素材库: 查询失败")
+    else:
+        lines.append("  写作素材库: 未加载")
+
+    # 动态记忆
+    if plugin.rag_memory_store:
+        try:
+            mem_stats = await plugin.rag_memory_store.get_stats()
+            total_mem = mem_stats.get("total_memories", 0)
+            total_sessions = mem_stats.get("total_sessions", 0)
+            lines.append(f"  动态记忆: {total_mem} 条 ({total_sessions} 个会话)")
+        except Exception:
+            lines.append("  动态记忆: 查询失败")
+    else:
+        lines.append("  动态记忆: 未加载")
+
+    # Doc RAG
+    if plugin.rag_vector_store:
+        try:
+            vs_stats = await plugin.rag_vector_store.get_stats()
+            doc_count = vs_stats.get("total_docs", 0)
+            lines.append(f"  Doc RAG: {doc_count} 条向量")
+        except Exception:
+            lines.append("  Doc RAG: 查询失败")
+    else:
+        lines.append("  Doc RAG: 未加载")
+
+    # 健康度（P1-6）
+    if hasattr(plugin, "health_tracker") and plugin.health_tracker:
+        try:
+            h = plugin.health_tracker.stats()
+            rag_rate = h.get("rag", {}).get("rate")
+            sb_rate = h.get("status_bar", {}).get("rate")
+            if rag_rate is not None:
+                lines.append(f"  RAG检索成功率: {rag_rate}% ({h['rag']['success']}/{h['rag']['total']})")
+            if sb_rate is not None:
+                lines.append(f"  状态栏解析成功率: {sb_rate}% ({h['status_bar']['success']}/{h['status_bar']['total']})")
+            # 降级链逐级命中分布：判断「主力路径是哪一级」，调提示词/字段表时
+            # 有据可依（此前只能 grep 日志文本，看不出比例）
+            lv = h.get("status_bar", {}).get("levels") or {}
+            if lv:
+                top = " · ".join(f"{k}×{v}" for k, v in list(lv.items())[:4])
+                lines.append(f"  降级链命中: {top}")
+        except Exception:
+            lines.append("  健康度: 查询失败")
+
+    event.set_result(MessageEventResult().message("\n".join(lines)).use_t2i(False))
+
+
+async def quill_test(plugin, event: AstrMessageEvent, system: str, text: str):
+    """
+    /quill test wr <文本>  — 测试素材库命中
+    /quill test wb <文本>  — 测试世界书命中
+    /quill test mem <文本> — 测试记忆检索
+    """
+    system = (system or "").strip().lower()
+    text = (text or "").strip()
+
+    if not text:
+        event.set_result(MessageEventResult().message("用法: /quill test <wr|wb|mem> <文字>"))
+        return
+
+    if system == "wr":
+        await _test_wr(plugin, event, text)
+    elif system == "wb":
+        await _test_wb(plugin, event, text)
+    elif system == "mem":
+        await _test_mem(plugin, event, text)
+    else:
+        event.set_result(MessageEventResult().message("用法: /quill test <wr|wb|mem> <文字>"))
+
+
+async def _test_wr(plugin, event: AstrMessageEvent, text: str):
+    if not plugin.wr_manager:
+        event.set_result(MessageEventResult().message("写作素材库未加载，无法测试"))
+        return
+    try:
+        results = await plugin.wr_manager.match(text, top_k=5, log_match=False)
+        if not results:
+            event.set_result(MessageEventResult().message(
+                f"WR 未匹配到任何条目\n输入: {text[:80]}"
+            ))
+            return
+        lines = [f"[WR 测试] 匹配到 {len(results)} 条:"]
+        for r in results:
+            name = r.get("name") or r.get("entry_id", "?")
+            score = r.get("match_score", 0)
+            kw = r.get("matched_keywords", [])
+            kw_str = ", ".join(str(k) for k in (kw or []))
+            cat = r.get("category", "")
+            cat_str = f" | 分类: {cat}" if cat else ""
+            lines.append(f"  [{score:.1f}] {name}{cat_str}")
+            if kw_str:
+                lines.append(f"       关键词: {kw_str}")
+        lines.append(f"输入: {text[:60]}")
+        event.set_result(MessageEventResult().message("\n".join(lines)).use_t2i(False))
+    except Exception as e:
+        event.set_result(MessageEventResult().message(error_text("WR 匹配失败", e)))
+
+
+async def _test_wb(plugin, event: AstrMessageEvent, text: str):
+    if not plugin.wb_manager:
+        event.set_result(MessageEventResult().message("世界书系统未加载，无法测试"))
+        return
+    try:
+        target_id = _get_target_id(event)
+        # 获取当前角色卡绑定的世界书
+        persona_id = await plugin.state_manager.get_persona_id(target_id) if hasattr(plugin.state_manager, "get_persona_id") else None
+        bound_worldbooks = None  # None = Auto mode (search all)
+        if persona_id and plugin.persona_manager:
+            pdata = await plugin.persona_manager.get_persona(persona_id)
+            if pdata:
+                ext = pdata.get("quill_extensions", {})
+                wb_mode = ext.get("wb_mode", "disabled")
+                if wb_mode == "custom":
+                    bound_worldbooks = ext.get("bound_worldbooks", [])
+                # disabled mode: bound_worldbooks stays None (still allow testing)
+        results = plugin.wb_manager.match_entries(text, bound_worldbooks=bound_worldbooks, top_k=5)
+        if not results:
+            event.set_result(MessageEventResult().message(
+                f"WB 未匹配到任何条目\n输入: {text[:80]}"
+            ))
+            return
+        trigger_log = plugin.wb_manager.get_trigger_log()
+        lines = [f"[WB 测试] 匹配到 {len(results)} 条:"]
+        for log in trigger_log[:5]:
+            title = log.get("title", "?")
+            score = log.get("score", 0)
+            wb_name = log.get("worldbook", "")
+            matched = log.get("matched_keys", [])
+            keys_str = ", ".join(matched) if matched else ""
+            lines.append(f"  [{score}] {title} (来自: {wb_name})")
+            if keys_str:
+                lines.append(f"       触发词: {keys_str}")
+        lines.append(f"输入: {text[:60]}")
+        event.set_result(MessageEventResult().message("\n".join(lines)).use_t2i(False))
+    except Exception as e:
+        event.set_result(MessageEventResult().message(error_text("WB 匹配失败", e)))
+
+
+async def _test_mem(plugin, event: AstrMessageEvent, text: str):
+    if not plugin.rag_retriever or not plugin.rag_retriever.memory_store:
+        event.set_result(MessageEventResult().message("动态记忆未加载，无法测试"))
+        return
+    if not plugin.rag_retriever.enable_memory:
+        event.set_result(MessageEventResult().message("动态记忆功能未启用。"))
+        return
+    try:
+        target_id = _get_target_id(event)
+        persona_id = ""
+        if hasattr(plugin.state_manager, "get_persona_id"):
+            persona_id = await plugin.state_manager.get_persona_id(target_id)
+        session_id = f"{target_id}::{persona_id}" if persona_id else target_id
+        results = await plugin.rag_retriever.search_memories(session_id, text)
+        if not results:
+            event.set_result(MessageEventResult().message(
+                f"Mem 未检索到相关记忆\n输入: {text[:80]}\n会话: {session_id}"
+            ))
+            return
+        lines = [f"[Mem 测试] 检索到 {len(results)} 条记忆:"]
+        for r in results:
+            summary = r.get("summary", r.get("content", "?"))[:80]
+            score = r.get("score", 0)
+            lines.append(f"  [{score:.2f}] {summary}")
+        lines.append(f"输入: {text[:60]}")
+        event.set_result(MessageEventResult().message("\n".join(lines)).use_t2i(False))
+    except Exception as e:
+        event.set_result(MessageEventResult().message(error_text("记忆检索失败", e)))
+
+
+async def quill_debug(plugin, event: AstrMessageEvent):
+    """P2-7: /quill debug — 注入组成查看。显示当前会话的注入详情、匹配状态、配置。
+
+    群聊需管理员：输出含会话标识（Target/Session/Persona）、字段表、各库条目数
+    与上一轮注入构成，属于内部诊断信息，不对群成员公开。
+    """
+    msg = _check_group_permission(plugin, event)
+    if msg:
+        event.set_result(MessageEventResult().message(msg))
+        return
+    target_id = _get_target_id(event)
+    lines = ["[Quill Debug Info]"]
+
+    # 会话信息
+    persona_id = ""
+    if hasattr(plugin.state_manager, "get_persona_id"):
+        persona_id = await plugin.state_manager.get_persona_id(target_id)
+    session_id = f"{target_id}::{persona_id}" if persona_id else target_id
+    lines.append(f"  Target: {target_id}")
+    lines.append(f"  Session: {session_id}")
+    lines.append(f"  Persona: {persona_id or '默认'}")
+
+    # 状态栏配置（M2.3：配置读取统一走 plugin.props 实时访问器）
+    lines.append(f"  状态栏: {'启用' if plugin.props.status_bar_enabled else '关闭'}")
+    lines.append(f"  字段: {', '.join(plugin.props.love_fields)}")
+
+    # 写作素材库
+    if plugin.wr_manager:
+        try:
+            stats = await plugin.wr_manager.get_stats()
+            lines.append(f"  WR 条目: {stats.get('total_entries', 0)} 条")
+        except Exception:
+            lines.append("  WR: 查询失败")
+
+    # 世界书
+    if plugin.wb_manager:
+        try:
+            # 审查修复：list_worldbooks() 返回 List[str]，此前按 dict 取 .get 必然抛
+            # AttributeError 被吞，导致本行永远显示"查询失败"
+            wb_names = plugin.wb_manager.list_worldbooks()
+            lines.append(f"  世界书: {len(wb_names)} 个已加载")
+        except Exception:
+            lines.append("  世界书: 查询失败")
+
+    # 动态记忆
+    if plugin.rag_memory_store:
+        try:
+            mem_stats = await plugin.rag_memory_store.get_stats()
+            lines.append(f"  动态记忆: {mem_stats.get('total_memories', 0)} 条")
+        except Exception:
+            lines.append("  动态记忆: 查询失败")
+
+    # 健康度
+    if hasattr(plugin, "health_tracker") and plugin.health_tracker:
+        try:
+            h = plugin.health_tracker.stats()
+            rag_rate = h.get("rag", {}).get("rate")
+            sb_rate = h.get("status_bar", {}).get("rate")
+            if rag_rate is not None:
+                lines.append(f"  RAG 成功率: {rag_rate}%")
+            if sb_rate is not None:
+                lines.append(f"  状态栏成功率: {sb_rate}%")
+                # 降级链逐级命中分布（次数降序）。调提示词/字段表时用它判断
+                # 「主力路径是哪一级」——此前只能 grep 日志文本，看不出比例。
+                lv = h.get("status_bar", {}).get("levels") or {}
+                if lv:
+                    top = " · ".join(f"{k}×{v}" for k, v in list(lv.items())[:4])
+                    lines.append(f"  降级链命中: {top}")
+        except Exception as e:
+            # L4：诊断指令里不能静默吞异常——否则用户分不清「没数据」和
+            # 「查询炸了」。相邻的 WR/WB/记忆段落都是打印「查询失败」。
+            logger.warning(f"[Quill] /quill debug 读取健康度失败: {e}")
+            lines.append("  健康度: 查询失败（详见服务端日志）")
+
+    # Session vars
+    try:
+        svars = await plugin.state_manager.get_session_vars(target_id)
+        if svars:
+            vars_str = ", ".join(f"{k}={v}" for k, v in list(svars.items())[:8])
+            lines.append(f"  Session Vars: {vars_str}")
+    except Exception as e:
+        logger.warning(f"[Quill] /quill debug 读取 Session Vars 失败: {e}")
+        lines.append("  Session Vars: 查询失败（详见服务端日志）")
+
+    # 上一轮注入构成（无论 debug 开关都能查，用于调参时的事后核对）
+    if hasattr(plugin, "_format_inject_report"):
+        report = plugin._format_inject_report(plugin._get_inject_report(target_id))
+        lines.append(f"  注入: {report or '（无命中记录）'}")
+
+    # JEV 轮次判定（内存态，仅最近一轮；未启用/本轮无判定时无此行）
+    rd = (getattr(plugin, "_jev_round_cache", None) or {}).get(target_id)
+    if isinstance(rd, dict) and rd.get("probs"):
+        opts = rd.get("options") or []
+        dist = " / ".join(
+            f"选项{k} {round(float(v) * 100)}%"
+            for k, v in sorted(rd["probs"].items(), key=lambda kv: str(kv[0]))
+        )
+        pick = rd.get("pick")
+        pick_txt = f" → 分支 {pick}（{opts[pick - 1]}）" if pick and 1 <= pick <= len(opts) else ""
+        lines.append(f"  JEV 推荐选择度: {dist}{pick_txt}（置信度 {float(rd.get('confidence', 0)):.2f}）")
+    elif getattr(plugin.config, "status_bar_jev_enabled", False):
+        lines.append("  JEV: 已启用，本轮无判定（未触发/低置信/判定失败均静默跳过）")
+
+    event.set_result(MessageEventResult().message("\n".join(lines)).use_t2i(False))
+
+
+# ================================================================
+# /memory — 动态记忆管理
+# ================================================================
+
+async def memory_dispatch(plugin, event: AstrMessageEvent, arg1: str, arg2: str):
+    """
+    /memory                    当前记忆统计
+    /memory list [页码]        列出记忆（5条/页）
+    /memory del <序号>         删除指定记忆
+    /memory clear              清空当前会话所有记忆
+    /memory learn <内容>       手动添加一条记忆
+    /memory search <关键词>    关键词搜索记忆
+    /memory pin <序号> [on|off]  钉住/取消核心记忆
+    /memory core <内容>       直接写入核心记忆（不参与遗忘）
+    @记住：<内容>             对话中自然语言写入核心记忆
+    """
+    if not plugin.rag_memory_store:
+        event.set_result(MessageEventResult().message("动态记忆系统未加载"))
+        return
+
+    sub = (arg1 or "").strip().lower()
+    target_id = _get_target_id(event)
+    persona_id = ""
+    if hasattr(plugin.state_manager, "get_persona_id"):
+        persona_id = await plugin.state_manager.get_persona_id(target_id)
+    session_id = f"{target_id}::{persona_id}" if persona_id else target_id
+
+    if not arg1:
+        stats = await plugin.rag_memory_store.get_stats()
+        lines = [
+            f"[记忆统计]",
+            f"  总记忆数: {stats.get('total_memories', 0)}",
+            f"  总会话数: {stats.get('total_sessions', 0)}",
+            f"\n使用: /memory list 查看列表",
+            f"     /memory del <序号> 删除记忆",
+            f"     /memory clear 清空当前会话",
+            f"     /memory learn <内容> 添加记忆",
+            f"     /memory search <词> 搜索记忆",
+            f"     /memory pin <序号> [on|off] 钉住/取消核心记忆",
+        ]
+        event.set_result(MessageEventResult().message("\n".join(lines)).use_t2i(False))
+        return
+
+    if sub == "list":
+        page_str = (arg2 or "1").strip()
+        try:
+            # L5：页码要夹上限——offset 会进 list_memories 的 SQL LIMIT
+            page = min(max(1, int(page_str)), _MAX_MEMORY_PAGE)
+        except ValueError:
+            page = 1
+        page_size = 5
+        offset = (page - 1) * page_size
+        try:
+            # total 用真实 COUNT，all_memories 只取当前页所需行数
+            total = await plugin.rag_memory_store.count_session_memories(session_id)
+            all_memories = await plugin.rag_memory_store.list_memories(session_id, offset + page_size)
+        except Exception:
+            total = 0
+            all_memories = []
+
+        if not all_memories:
+            event.set_result(MessageEventResult().message(f"当前会话没有记忆。\n会话: {session_id}"))
+            return
+
+        if not total:
+            total = len(all_memories)
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        # L5：页码越界此前报「当前会话没有记忆」，而列表其实是有的 —— 用户会被
+        # 误导去怀疑记忆丢了。这里先按真实总数判越界，给出确切的页码范围。
+        if offset >= total:
+            event.set_result(MessageEventResult().message(
+                f"页码超出范围: 第 {page} 页不存在（共 {total_pages} 页，共 {total} 条）"
+            ))
+            return
+
+        page_items = all_memories[offset:offset + page_size]
+
+        lines = [f"[记忆列表] 第 {page}/{total_pages} 页 (共 {total} 条)"]
+        for idx, m in enumerate(page_items, offset + 1):
+            memory_id = m.get("id", "?")
+            summary = m.get("summary", "?")[:60]
+            ts = m.get("timestamp", "")
+            lines.append(f"  #{idx} [{memory_id}] {summary}")
+            if ts:
+                lines.append(f"        {ts}")
+        lines.append(f"\n使用: /memory del <序号> 删除")
+        event.set_result(MessageEventResult().message("\n".join(lines)).use_t2i(False))
+        return
+
+    if sub == "del":
+        msg = _check_group_permission(plugin, event)
+        if msg:
+            event.set_result(MessageEventResult().message(msg))
+            return
+        idx_str = (arg2 or "").strip()
+        if not idx_str or not idx_str.isdigit():
+            event.set_result(MessageEventResult().message("用法: /memory del <序号>（使用 /memory list 查看序号）"))
+            return
+        idx = int(idx_str)
+        # L5：序号即 SQL LIMIT，先夹上限，避免一次请求把整个会话记忆拉进内存
+        if idx > _MAX_MEMORY_INDEX:
+            event.set_result(MessageEventResult().message(
+                f"序号超出范围: {idx}（上限 {_MAX_MEMORY_INDEX}）"
+            ))
+            return
+        try:
+            all_memories = await plugin.rag_memory_store.list_memories(
+                session_id, min(max(idx, 50), _MAX_MEMORY_INDEX)
+            )
+            if 0 < idx <= len(all_memories):
+                memory_id = all_memories[idx - 1].get("id")
+                if memory_id and await plugin.rag_memory_store.delete_memory(memory_id):
+                    event.set_result(MessageEventResult().message(f"已删除记忆 #{idx}"))
+                else:
+                    event.set_result(MessageEventResult().message(f"删除失败"))
+            else:
+                event.set_result(MessageEventResult().message(f"序号超出范围: {idx}"))
+        except Exception as e:
+            event.set_result(MessageEventResult().message(error_text("删除失败", e)))
+        return
+
+    if sub == "clear":
+        msg = _check_group_permission(plugin, event)
+        if msg:
+            event.set_result(MessageEventResult().message(msg))
+            return
+        try:
+            deleted = await plugin.rag_memory_store.delete_session_memories(session_id)
+            chat_deleted = await plugin.rag_memory_store.delete_session_chat_logs(session_id)
+            await plugin.state_manager.reset_unsummarized_turns(target_id)
+            await plugin.state_manager.update_last_learned_id(target_id, 0)
+            msg = f"已清空当前会话 {deleted} 条记忆"
+            if chat_deleted:
+                msg += f"、{chat_deleted} 条对话日志"
+            event.set_result(MessageEventResult().message(msg))
+        except Exception as e:
+            event.set_result(MessageEventResult().message(error_text("清空失败", e)))
+        return
+
+    if sub == "learn":
+        msg = _check_group_permission(plugin, event)
+        if msg:
+            event.set_result(MessageEventResult().message(msg))
+            return
+        if not plugin.rag_retriever or not plugin.rag_retriever.enable_memory:
+            event.set_result(MessageEventResult().message(
+                "动态记忆功能未启用，无法学习。\n"
+                "请在对话中自然产生内容，系统会自动提取和存储。"
+            ))
+            return
+
+        content = (arg2 or "").strip()
+
+        # ── 有内容 → 单条学习 ──
+        if content:
+            try:
+                await plugin.rag_retriever.store_memory_direct(session_id, content)
+                event.set_result(MessageEventResult().message(f"已学习: {content[:50]}..."))
+            except Exception as e:
+                event.set_result(MessageEventResult().message(error_text("学习失败", e)))
+            return
+
+        # ── 无内容 → 增量总结本地 chat_logs ──
+        try:
+            last_learned_id = await plugin.state_manager.get_last_learned_id(target_id)
+            new_logs = await plugin.rag_memory_store.get_chat_logs_after(session_id, last_learned_id, limit=50)
+            if not new_logs:
+                event.set_result(MessageEventResult().message(
+                    "⚠️ 没有新的对话记录可供总结。\n"
+                    "请先聊几句，再发送 /memory learn 增量总结。"
+                ))
+                return
+            if len(new_logs) < 2:
+                event.set_result(MessageEventResult().message(
+                    "⚠️ 新对话记录不足（至少需要 2 条）。\n"
+                    "请再多聊几句，再发送 /memory learn。"
+                ))
+                return
+            contexts = [{"role": log["role"], "content": log["content"]} for log in new_logs]
+            summary = await plugin.rag_retriever.summarize_contexts(session_id, contexts)
+            new_max_id = max(log["id"] for log in new_logs)
+            await plugin.state_manager.update_last_learned_id(target_id, new_max_id)
+            event.set_result(MessageEventResult().message(
+                f"✅ 已增量总结 {len(new_logs)} 条新对话并存储为记忆：\n\n{summary}"
+            ))
+        except ValueError as e:
+            event.set_result(MessageEventResult().message(f"⚠️ {e}"))
+        except Exception as e:
+            event.set_result(MessageEventResult().message(error_text("自动总结失败", e)))
+        return
+
+    if sub == "search":
+        query = (arg2 or "").strip()
+        if not query:
+            event.set_result(MessageEventResult().message("用法: /memory search <关键词>"))
+            return
+        try:
+            if plugin.rag_retriever:
+                results = await plugin.rag_retriever.search_memories(session_id, query)
+                if not results:
+                    event.set_result(MessageEventResult().message("未找到匹配的记忆。"))
+                    return
+                lines = [f"[记忆搜索] \"{query}\" → {len(results)} 条:"]
+                for r in results:
+                    summary = r.get("summary", "?")[:60]
+                    # 混合检索返回 rrf_score/vec_score，无 "score" 键。
+                    # 用显式 None 判定：rrf_score 合法地可能为 0.0，`or` 会把它
+                    # 误判成「没有该键」而回落到 vec_score（显示分就错了）。
+                    score = r.get("rrf_score")
+                    if score is None:
+                        score = r.get("vec_score", 0) or 0
+                    lines.append(f"  [{score:.2f}] {summary}")
+                event.set_result(MessageEventResult().message("\n".join(lines)).use_t2i(False))
+            else:
+                event.set_result(MessageEventResult().message("检索器未就绪"))
+        except Exception as e:
+            event.set_result(MessageEventResult().message(error_text("搜索失败", e)))
+        return
+
+    # 审查修复：pin/core 分支此前误嵌在 search 块的无条件 return 之后（不可达死代码），
+    # 现提升到函数顶层，/memory pin 与 /memory core 才真正可用。
+    if sub == "pin":
+        msg = _check_group_permission(plugin, event)
+        if msg:
+            event.set_result(MessageEventResult().message(msg))
+            return
+        parts = (arg2 or "").strip().split(None, 1)
+        if not parts or not parts[0].isdigit():
+            event.set_result(MessageEventResult().message("用法: /memory pin <序号> [on|off]（使用 /memory list 查看序号）"))
+            return
+        idx = int(parts[0])
+        if idx > _MAX_MEMORY_INDEX:  # L5：同上，序号即 SQL LIMIT
+            event.set_result(MessageEventResult().message(
+                f"序号超出范围: {idx}（上限 {_MAX_MEMORY_INDEX}）"
+            ))
+            return
+        want_core = True  # 默认钉住
+        if len(parts) > 1:
+            flag = parts[1].strip().lower()
+            if flag == "off":
+                want_core = False
+            elif flag == "on":
+                want_core = True
+            else:
+                event.set_result(MessageEventResult().message("用法: /memory pin <序号> [on|off]"))
+                return
+        try:
+            all_memories = await plugin.rag_memory_store.list_memories(
+                session_id, min(max(idx, 50), _MAX_MEMORY_INDEX)
+            )
+            if 0 < idx <= len(all_memories):
+                memory_id = all_memories[idx - 1].get("id")
+                if memory_id:
+                    ok = await plugin.rag_memory_store.set_core(memory_id, want_core)
+                    if ok:
+                        label = "已钉住为核心记忆" if want_core else "已取消核心记忆"
+                        event.set_result(MessageEventResult().message(f"记忆 #{idx} {label}"))
+                    else:
+                        event.set_result(MessageEventResult().message(f"操作失败"))
+                else:
+                    event.set_result(MessageEventResult().message(f"记忆 #{idx} 不存在"))
+            else:
+                event.set_result(MessageEventResult().message(f"序号超出范围: {idx}"))
+        except Exception as e:
+            event.set_result(MessageEventResult().message(error_text("钉住失败", e)))
+        return
+
+    if sub == "core":
+        msg = _check_group_permission(plugin, event)
+        if msg:
+            event.set_result(MessageEventResult().message(msg))
+            return
+        content = (arg2 or "").strip()
+        if not content:
+            event.set_result(MessageEventResult().message("用法: /memory core <内容> — 直接写入核心记忆（不参与遗忘）"))
+            return
+        try:
+            await plugin.rag_memory_store.update_core_memory(session_id, content, content)
+            event.set_result(MessageEventResult().message(f"✅ 核心记忆已更新:\n{content[:200]}"))
+        except Exception as e:
+            event.set_result(MessageEventResult().message(error_text("写入核心记忆失败", e)))
+        return
+
+    event.set_result(MessageEventResult().message(
+        "未知子命令。\n用法: /memory [list|del|clear|learn|search|pin|core]"
+    ))
+
+
+# ================================================================
+# /doc — 外部文档 (Doc RAG)
+# ================================================================
+
+async def doc_dispatch(plugin, event: AstrMessageEvent, arg1: str, arg2: str):
+    """
+    /doc list             列出已加载的外部文档
+    /doc bind <序号>      绑定文档到当前角色卡
+    /doc unbind <序号>    解绑文档从当前角色卡
+    /doc search <关键词>  RAG 检索返回原文片段
+    /doc reload           重新加载文档索引
+    """
+    if not plugin.rag_vector_store:
+        event.set_result(MessageEventResult().message("Doc RAG 系统未加载"))
+        return
+
+    sub = (arg1 or "").strip().lower()
+
+    if not arg1 or sub == "list":
+        await _doc_list(plugin, event)
+        return
+
+    if sub == "bind":
+        if not arg2:
+            event.set_result(MessageEventResult().message("用法: /doc bind <序号>"))
+            return
+        await _doc_bind(plugin, event, arg2.strip())
+        return
+
+    if sub == "unbind":
+        if not arg2:
+            event.set_result(MessageEventResult().message("用法: /doc unbind <序号>"))
+            return
+        await _doc_unbind(plugin, event, arg2.strip())
+        return
+
+    if sub == "search":
+        query = (arg2 or "").strip()
+        if not query:
+            event.set_result(MessageEventResult().message("用法: /doc search <关键词>"))
+            return
+        try:
+            if plugin.rag_retriever:
+                results = await plugin.rag_retriever.search_documents(query)
+                if not results:
+                    event.set_result(MessageEventResult().message("未找到匹配的文档。"))
+                    return
+                lines = [f"[Doc 检索] \"{query}\" → {len(results)} 段:"]
+                for r in results:
+                    content = r.get("content", "?")[:100]
+                    score = r.get("score", 0)
+                    source = r.get("source", "")
+                    source_str = f" ({source})" if source else ""
+                    lines.append(f"  [{score:.2f}]{source_str} {content}")
+                event.set_result(MessageEventResult().message("\n".join(lines)).use_t2i(False))
+            else:
+                event.set_result(MessageEventResult().message("检索器未就绪"))
+        except Exception as e:
+            event.set_result(MessageEventResult().message(error_text("搜索失败", e)))
+        return
+
+    if sub == "reload":
+        # 与 /wb reload 同理：换掉共享的向量索引，影响所有会话。
+        msg = _check_group_permission(plugin, event)
+        if msg:
+            event.set_result(MessageEventResult().message(msg))
+            return
+        try:
+            if plugin.rag_retriever and plugin.rag_retriever.vector_store:
+                await plugin.rag_retriever.vector_store.load_index()
+                event.set_result(MessageEventResult().message("文档索引已重新加载"))
+            else:
+                event.set_result(MessageEventResult().message("文档系统未初始化"))
+        except Exception as e:
+            event.set_result(MessageEventResult().message(error_text("重载失败", e)))
+        return
+
+    event.set_result(MessageEventResult().message(
+        "未知子命令。\n用法: /doc [list|bind <序号>|unbind <序号>|search <关键词>|reload]"
+    ))
+
+
+async def _doc_list(plugin, event: AstrMessageEvent):
+    try:
+        docs = await plugin.rag_vector_store.list_documents()
+        if not docs:
+            event.set_result(MessageEventResult().message("没有已加载的外部文档。"))
+            return
+
+        target_id = _get_target_id(event)
+
+        # 获取当前角色卡绑定的文档
+        persona_bound: set = set()
+        persona_name = ""
+        persona_mode = "disabled"
+        if hasattr(plugin.state_manager, "get_persona_id"):
+            persona_id = await plugin.state_manager.get_persona_id(target_id)
+            if persona_id and plugin.persona_manager:
+                pdata = await plugin.persona_manager.get_persona(persona_id)
+                if pdata:
+                    ext = pdata.get("quill_extensions", {})
+                    persona_bound = set(ext.get("bound_rag_docs", []))
+                    persona_mode = ext.get("rag_mode", "disabled")
+                    persona_name = pdata.get("name", persona_id)
+
+        lines = [f"可用文档（✓ 已绑定 | 模式: {persona_mode}）："]
+        for i, d in enumerate(docs, 1):
+            source = d.get("source", d.get("doc_id", "?"))
+            chunks = d.get("chunk_count", "")
+            chunk_str = f" ({chunks} 段)" if chunks else ""
+            mark = "✓" if source in persona_bound else " "
+            lines.append(f"  {mark} {i}. {source}{chunk_str}")
+
+        if persona_name:
+            lines.append(f"\n当前角色: {persona_name}（模式: {persona_mode}）")
+
+        lines.append("")
+        lines.append("使用: /doc bind <序号>      绑定到当前角色")
+        lines.append("     /doc unbind <序号>    解绑从当前角色")
+        lines.append("     /doc search <关键词>  检索文档")
+        lines.append("     /doc reload           重新加载索引")
+        event.set_result(MessageEventResult().message("\n".join(lines)).use_t2i(False))
+    except Exception as e:
+        event.set_result(MessageEventResult().message(error_text("查询失败", e)))
+
+
+async def _doc_bind(plugin, event: AstrMessageEvent, arg: str):
+    """绑定文档到当前激活的角色卡"""
+    msg = _check_group_permission(plugin, event)
+    if msg:
+        event.set_result(MessageEventResult().message(msg))
+        return
+    target_id = _get_target_id(event)
+
+    if not hasattr(plugin.state_manager, "get_persona_id"):
+        event.set_result(MessageEventResult().message("角色系统未加载"))
+        return
+
+    persona_id = await plugin.state_manager.get_persona_id(target_id)
+    if not persona_id:
+        event.set_result(MessageEventResult().message("请先激活一个角色卡"))
+        return
+
+    # 解析文档序号
+    if not arg.isdigit():
+        event.set_result(MessageEventResult().message("请提供文档序号（纯数字）"))
+        return
+
+    idx = int(arg) - 1
+    docs = await plugin.rag_vector_store.list_documents()
+    if idx < 0 or idx >= len(docs):
+        event.set_result(MessageEventResult().message(f"文档序号不存在: {arg}"))
+        return
+
+    doc_source = docs[idx].get("source", "")
+    chunk_count = docs[idx].get("chunk_count", 0)
+
+    # 获取角色卡数据
+    if not plugin.persona_manager:
+        event.set_result(MessageEventResult().message("角色卡管理器未加载"))
+        return
+
+    persona_data = await plugin.persona_manager.get_persona(persona_id)
+    if not persona_data:
+        event.set_result(MessageEventResult().message("角色卡不存在"))
+        return
+
+    ext = persona_data.get("quill_extensions", {})
+    bound_docs = ext.get("bound_rag_docs", [])
+
+    if doc_source not in bound_docs:
+        bound_docs.append(doc_source)
+        ext["bound_rag_docs"] = bound_docs
+        ext["rag_mode"] = "custom"
+        persona_data["quill_extensions"] = ext
+
+        await plugin.persona_manager.update_persona(persona_id, persona_data)
+        logger.info(f"[Quill] 对话 {target_id} 绑定文档 '{doc_source}' 到角色卡 '{persona_id}'")
+        event.set_result(MessageEventResult().message(
+            f"已绑定文档: {doc_source} ({chunk_count} 段) → 当前角色"
+        ).use_t2i(False))
+    else:
+        logger.info(f"[Quill] 对话 {target_id} 尝试绑定已绑定的文档 '{doc_source}' 到角色卡 '{persona_id}'")
+        event.set_result(MessageEventResult().message(
+            f"文档已绑定: {doc_source} ({chunk_count} 段)"
+        ).use_t2i(False))
+
+
+async def _doc_unbind(plugin, event: AstrMessageEvent, arg: str):
+    """解绑文档从当前激活的角色卡"""
+    msg = _check_group_permission(plugin, event)
+    if msg:
+        event.set_result(MessageEventResult().message(msg))
+        return
+    target_id = _get_target_id(event)
+
+    if not hasattr(plugin.state_manager, "get_persona_id"):
+        event.set_result(MessageEventResult().message("角色系统未加载"))
+        return
+
+    persona_id = await plugin.state_manager.get_persona_id(target_id)
+    if not persona_id:
+        event.set_result(MessageEventResult().message("请先激活一个角色卡"))
+        return
+
+    # 解析文档序号
+    if not arg.isdigit():
+        event.set_result(MessageEventResult().message("请提供文档序号（纯数字）"))
+        return
+
+    idx = int(arg) - 1
+    docs = await plugin.rag_vector_store.list_documents()
+    if idx < 0 or idx >= len(docs):
+        event.set_result(MessageEventResult().message(f"文档序号不存在: {arg}"))
+        return
+
+    doc_source = docs[idx].get("source", "")
+
+    # 获取角色卡数据
+    if not plugin.persona_manager:
+        event.set_result(MessageEventResult().message("角色卡管理器未加载"))
+        return
+
+    persona_data = await plugin.persona_manager.get_persona(persona_id)
+    if not persona_data:
+        event.set_result(MessageEventResult().message("角色卡不存在"))
+        return
+
+    ext = persona_data.get("quill_extensions", {})
+    bound_docs = ext.get("bound_rag_docs", [])
+
+    if doc_source in bound_docs:
+        bound_docs.remove(doc_source)
+        ext["bound_rag_docs"] = bound_docs
+        persona_data["quill_extensions"] = ext
+
+        await plugin.persona_manager.update_persona(persona_id, persona_data)
+        logger.info(f"[Quill] 对话 {target_id} 解绑文档 '{doc_source}' 从角色卡 '{persona_id}'")
+        event.set_result(MessageEventResult().message(
+            f"已解绑文档: {doc_source} 从当前角色"
+        ).use_t2i(False))
+    else:
+        logger.info(f"[Quill] 对话 {target_id} 尝试解绑未绑定的文档 '{doc_source}' 从角色卡 '{persona_id}'")
+        event.set_result(MessageEventResult().message(
+            f"文档未绑定: {doc_source}"
+        ).use_t2i(False))
+
+
+# ================================================================
+# /stream — 流式控制
+# ================================================================
+
+_MODE_MAP = {
+    "on": "on", "off": "off", "auto": "auto",
+    "开": "on", "关": "off", "自动": "auto",
+}
+
+
+async def stream_dispatch(plugin, event: AstrMessageEvent, arg: str):
+    """/stream on|off|auto — 控制流式模式"""
+    target_id = _get_target_id(event)
+    arg = (arg or "").strip().lower()
+
+    if arg not in _MODE_MAP:
+        state = await plugin.state_manager.get_state(target_id)
+        event.set_result(MessageEventResult().message(
+            f"当前流式模式: {state.stream_mode}\n"
+            "用法: /stream on|off|auto"
+        ))
+        return
+
+    msg = _check_group_permission(plugin, event)
+    if msg:
+        event.set_result(MessageEventResult().message(msg))
+        return
+
+    new_mode = _MODE_MAP[arg]
+    await plugin.state_manager.set_stream_mode(target_id, new_mode)
+    mode_names = {"on": "开启（强制流式）", "off": "关闭（强制无流式）", "auto": "自动（默认）"}
+    event.set_result(MessageEventResult().message(
+        f"流式模式已设为: {mode_names[new_mode]}"
+    ))
+
+
+# ================================================================
+# /quill statusbar — 状态栏会话级开关
+# ================================================================
+
+_SB_MODE_MAP = {
+    "on": "on", "off": "off", "auto": "auto",
+    "开": "on", "关": "off", "自动": "auto",
+}
+
+
+async def statusbar_dispatch(plugin, event: AstrMessageEvent, arg: str):
+    """/quill statusbar on|off|auto — 会话级覆盖状态栏开关。
+
+    语义与面板全局开关一致，粒度不同：
+      auto —— 跟随面板（默认）
+      on   —— 本会话强制开（面板关着也生效）
+      off  —— 本会话强制关（面板开着也关闭）
+
+    无参数时只显示当前状态（含生效值与来源），便于排查「为什么没状态栏」。
+    """
+    target_id = _get_target_id(event)
+    arg = (arg or "").strip().lower()
+
+    if arg not in _SB_MODE_MAP:
+        mode = await plugin.state_manager.get_status_bar_mode(target_id)
+        global_on = bool(plugin.props.status_bar_enabled)
+        effective = global_on if mode == "auto" else (mode == "on")
+        source = "跟随面板" if mode == "auto" else "会话覆盖"
+        event.set_result(MessageEventResult().message(
+            f"状态栏会话设置: {mode}（{source}）\n"
+            f"面板全局开关: {'开' if global_on else '关'}\n"
+            f"本轮实际生效: {'启用' if effective else '关闭'}\n"
+            "用法: /quill statusbar on|off|auto"
+        ).use_t2i(False))
+        return
+
+    msg = _check_group_permission(plugin, event)
+    if msg:
+        event.set_result(MessageEventResult().message(msg))
+        return
+
+    new_mode = _SB_MODE_MAP[arg]
+    await plugin.state_manager.set_status_bar_mode(target_id, new_mode)
+    names = {"on": "强制开启", "off": "强制关闭", "auto": "跟随面板全局"}
+    event.set_result(MessageEventResult().message(
+        f"状态栏已设为: {names[new_mode]}（仅对当前会话生效）"
+    ))
+
+
+# ================================================================
+# /reinject — 强制重置注入状态
+# ================================================================
+
+async def reinject_dispatch(plugin, event: AstrMessageEvent):
+    """/reinject — 重置 quill_rounds，下次激活重新注入全部常驻内容"""
+    msg = _check_group_permission(plugin, event)
+    if msg:
+        event.set_result(MessageEventResult().message(msg))
+        return
+    target_id = _get_target_id(event)
+    await plugin.state_manager.reset_quill_rounds(target_id)
+    event.set_result(MessageEventResult().message(
+        "已重置注入状态。下次触发 Quill 时将重新注入全部常驻素材。"
+    ))
+
+
+# ================================================================
+# /quill reset — 重开当前角色卡这段剧情（保留长期记忆）
+# ================================================================
+
+async def quill_reset(plugin, event: AstrMessageEvent):
+    """/quill reset — 清掉当前角色卡的对话上下文与日志，**保留动态记忆**。
+
+    清理内容（只作用于**当前角色卡**，不影响其他角色卡）：
+    - AstrBot 对话历史（本卡专属 conversation 的 history 清空）
+    - 对话日志（chat_logs 中本卡 session 的记录，避免断点续传垫回旧上下文）
+    - quill_rounds / unsummarized_turns / last_learned_id 归零
+
+    **不清**动态记忆（memories）—— 长期记忆跨重置保留，AI 仍记得设定与过往，
+    只是不记得刚才那几分钟的对话。想彻底清记忆请用 /memory clear。
+
+    隔离前提：每个角色卡各自绑定一个 AstrBot 对话（见
+    QuillPlugin._ensure_persona_conversation），所以这里清对话只影响当前卡。
+    """
+    msg = _check_group_permission(plugin, event)
+    if msg:
+        event.set_result(MessageEventResult().message(msg))
+        return
+
+    target_id = _get_target_id(event)
+    persona_id = await plugin.state_manager.get_persona_id(target_id)
+    mem_session_id = f"{target_id}::{persona_id}" if persona_id else target_id
+
+    log_deleted = 0
+    if plugin.rag_retriever and plugin.rag_retriever.memory_store:
+        try:
+            # 只删当前角色卡的日志（此前是 delete_all_session_chat_logs，
+            # 会把所有角色卡的日志一起清掉，与「按卡隔离」相悖）
+            log_deleted = await plugin.rag_retriever.memory_store.delete_session_chat_logs(
+                mem_session_id
+            )
+        except Exception as e:
+            logger.warning(f"[Quill] /quill reset 清理对话日志失败: {e}")
+
+    # 清空当前角色卡专属对话的 AstrBot 历史（与内置 /reset 同款做法）
+    conv_cleared = False
+    conv_mgr = getattr(plugin.context, "conversation_manager", None)
+    if conv_mgr is not None:
+        try:
+            cid = await conv_mgr.get_curr_conversation_id(target_id)
+            if cid:
+                await conv_mgr.update_conversation(target_id, cid, [])
+                conv_cleared = True
+        except Exception as e:
+            logger.warning(f"[Quill] /quill reset 清空对话历史失败: {e}")
+
+    await plugin.state_manager.reset_quill_rounds(target_id)
+    await plugin.state_manager.reset_unsummarized_turns(target_id)
+    await plugin.state_manager.update_last_learned_id(target_id, 0)
+
+    msg = "✅ Quill 会话已重置\n"
+    msg += "  · 动态记忆: 已保留（长期记忆不受影响）\n"
+    msg += f"  · 对话日志: 已清空 {log_deleted} 条\n"
+    msg += f"  · 对话上下文: {'已清空' if conv_cleared else '未清空（无法访问会话管理器）'}\n"
+    msg += "  · 注入轮次: 已归零\n"
+    msg += "  · 反思计数: 已归零\n"
+    msg += f"\n（仅影响当前角色卡，其他角色卡的记录未受影响）"
+    event.set_result(MessageEventResult().message(msg))
+

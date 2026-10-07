@@ -1,0 +1,1144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>羽笔 · 管理面板</title>
+<!--
+  主题：由服务端在 <html> 上写入 data-theme（AstrBot Plugin Pages 会按面板主题注入），
+  bridge 的 isDark 推送实时跟随；独立打开时回退到系统偏好。页面不提供手动主题开关
+  （遵循 Apple HIG：避免应用自带外观设置）。
+-->
+<script>
+(function () {
+  var d = document.documentElement;
+  if (!d.hasAttribute('data-theme')) {
+    var mq = window.matchMedia('(prefers-color-scheme: dark)');
+    d.setAttribute('data-theme', mq.matches ? 'dark' : 'light');
+    // 独立打开时跟随系统切换；嵌入面板时服务端/bridge 会覆盖此属性
+    var onChange = function (e) {
+      if (!window.__quillThemeLocked) d.setAttribute('data-theme', e.matches ? 'dark' : 'light');
+    };
+    if (mq.addEventListener) mq.addEventListener('change', onChange);
+    else if (mq.addListener) mq.addListener(onChange);
+  }
+})();
+</script>
+<!-- 字体：全部使用各系统自带字体，不加载任何外部字体资源（零 CDN 依赖）。
+     macOS → SF Pro / 苹方；Windows → 微软雅黑 / Segoe UI；Linux → Noto Sans SC。 -->
+
+  <link rel="stylesheet" href="css/tokens.css">
+  <link rel="stylesheet" href="css/base.css">
+  <link rel="stylesheet" href="css/components.css">
+  <link rel="stylesheet" href="css/layout.css">
+  <link rel="stylesheet" href="css/overlays.css">
+  <link rel="stylesheet" href="css/pages/writing.css">
+  <link rel="stylesheet" href="css/pages/worldbook.css">
+  <link rel="stylesheet" href="css/pages/persona.css">
+  <link rel="stylesheet" href="css/pages/rag.css">
+  <link rel="stylesheet" href="css/pages/memory.css">
+  <link rel="stylesheet" href="css/pages/config.css">
+  <link rel="stylesheet" href="css/responsive.css">
+</head>
+
+<body>
+
+<!-- 图标符号表：按 SF Symbols 风格自绘（24 网格、1.75 描边、圆端圆角）。
+     集中定义避免重复，全站用 <svg class="icon"><use href="#i-xxx"/></svg> 引用。 -->
+<svg id="icon-sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+  <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></symbol>
+  <symbol id="i-books" viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></symbol>
+  <symbol id="i-person" viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></symbol>
+  <symbol id="i-doc" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></symbol>
+  <symbol id="i-brain" viewBox="0 0 24 24"><path d="M12 5a3 3 0 0 0-6 0 3 3 0 0 0-2 5.2A3 3 0 0 0 5 15a3 3 0 0 0 4 2.8"/><path d="M12 5a3 3 0 0 1 6 0 3 3 0 0 1 2 5.2A3 3 0 0 1 19 15a3 3 0 0 1-4 2.8"/><path d="M12 5v14"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></symbol>
+  <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></symbol>
+  <symbol id="i-check-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><polyline points="8.5 12.5 11 15 15.5 9.5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></symbol>
+  <symbol id="i-x-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></symbol>
+  <symbol id="i-chevron-right" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></symbol>
+  <symbol id="i-chevron-up" viewBox="0 0 24 24"><polyline points="18 15 12 9 6 15"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></symbol>
+  <symbol id="i-flask" viewBox="0 0 24 24"><path d="M9 2h6"/><path d="M10 2v6.5L4.7 18a2 2 0 0 0 1.7 3h11.2a2 2 0 0 0 1.7-3L14 8.5V2"/><line x1="7.5" y1="15" x2="16.5" y2="15"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
+  <symbol id="i-heart" viewBox="0 0 24 24"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></symbol>
+  <symbol id="i-star" viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></symbol>
+  <symbol id="i-camera" viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></symbol>
+  <symbol id="i-crop" viewBox="0 0 24 24"><path d="M6.13 1L6 16a2 2 0 0 0 2 2h15"/><path d="M1 6.13L16 6a2 2 0 0 1 2 2v15"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14l-1.5-4.5V4H6.5v8.5z"/></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8z"/></symbol>
+  <symbol id="i-archive" viewBox="0 0 24 24"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5" rx="1"/><line x1="10" y1="12" x2="14" y2="12"/></symbol>
+  <symbol id="i-inbox" viewBox="0 0 24 24"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></symbol>
+  <symbol id="i-zap" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></symbol>
+  <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M18.5 15.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></symbol>
+</svg>
+
+<div class="layout">
+
+  <!-- ══ 源列表侧栏（桌面） ══ -->
+  <aside class="sidebar">
+    <div class="sidebar-head">
+      <div class="sidebar-logo">
+        <img src="logo.png" alt="" width="30" height="30" decoding="async"
+             onerror="this.hidden=true;this.nextElementSibling.hidden=false;">
+        <span class="sidebar-logo-glyph" hidden aria-hidden="true">羽</span>
+      </div>
+      <div>
+        <div class="sidebar-title">羽笔</div>
+        <div class="sidebar-ver" id="appVersion">Quill</div>
+      </div>
+    </div>
+    <nav class="sidebar-nav" id="sidebarNav" aria-label="主导航">
+      <div class="sidebar-group">
+        <div class="sidebar-label">内容</div>
+        <button type="button" class="sl-item is-selected" data-tab="wr" aria-current="page">
+          <svg class="icon" aria-hidden="true"><use href="#i-book"/></svg>
+          <span class="sl-item-label">写作素材库</span>
+          <span class="sl-badge" id="badge-wr" hidden>0</span>
+        </button>
+        <button type="button" class="sl-item" data-tab="wb">
+          <svg class="icon" aria-hidden="true"><use href="#i-books"/></svg>
+          <span class="sl-item-label">世界书</span>
+          <span class="sl-badge" id="badge-wb" hidden>0</span>
+        </button>
+        <button type="button" class="sl-item" data-tab="persona">
+          <svg class="icon" aria-hidden="true"><use href="#i-person"/></svg>
+          <span class="sl-item-label">角色卡</span>
+          <span class="sl-badge" id="badge-persona" hidden>0</span>
+        </button>
+      </div>
+      <div class="sidebar-group">
+        <div class="sidebar-label">知识系统</div>
+        <button type="button" class="sl-item" data-tab="rag">
+          <svg class="icon" aria-hidden="true"><use href="#i-doc"/></svg>
+          <span class="sl-item-label">文档知识库</span>
+          <span class="sl-badge" id="badge-rag" hidden>0</span>
+        </button>
+        <button type="button" class="sl-item" data-tab="memory">
+          <svg class="icon" aria-hidden="true"><use href="#i-brain"/></svg>
+          <span class="sl-item-label">动态记忆</span>
+          <span class="sl-badge" id="badge-memory" hidden>0</span>
+        </button>
+      </div>
+      <div class="sidebar-group">
+        <div class="sidebar-label">系统</div>
+        <button type="button" class="sl-item" data-tab="config">
+          <svg class="icon" aria-hidden="true"><use href="#i-gear"/></svg>
+          <span class="sl-item-label">配置</span>
+        </button>
+      </div>
+    </nav>
+    <div class="sidebar-foot">
+      世界书 · 素材库 · 角色卡<br>文档 RAG · 动态记忆
+    </div>
+  </aside>
+
+  <!-- ══ 内容区 ══ -->
+  <main class="content" id="content">
+
+    <!-- ───── 写作素材库 ───── -->
+    <section class="tab-pane is-active" id="pane-wr" role="region" aria-label="写作素材库">
+      <div class="page-head-bar">
+        <div class="page-head-bar-inner">
+          <div class="page-head">
+            <h2>写作素材库</h2>
+            <span class="page-sub" id="wrSub"></span>
+          </div>
+
+          <div class="toolbar">
+            <label class="search search--primary">
+              <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+              <input type="search" id="wrSearch" placeholder="搜索关键词、分类、内容" aria-label="搜索素材">
+              <button type="button" class="search-clear" data-action="clear-search" data-target="wrSearch" aria-label="清除搜索">
+                <svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>
+              </button>
+            </label>
+            <select class="field" id="wrCat" style="width:auto" aria-label="按分类筛选">
+              <option value="">全部分类</option>
+            </select>
+            <label class="check nowrap">
+              <input type="checkbox" id="wrOnlyConst">
+              <span>仅常驻</span>
+            </label>
+            <span class="grow"></span>
+            <div class="toolbar-actions">
+              <div class="wr-batch-actions">
+                <span class="select-pill" id="wrSelectPill" hidden>已选 0</span>
+                <button type="button" class="btn btn--gray" data-action="wr-batch-toggle" data-value="1" data-batch-action disabled>批量启用</button>
+                <button type="button" class="btn btn--gray" data-action="wr-batch-toggle" data-value="0" data-batch-action disabled>批量禁用</button>
+                <button type="button" class="btn btn--destructive-tinted" data-action="wr-batch-delete" data-batch-action disabled>批量删除</button>
+                <button type="button" class="btn btn--gray" data-action="wr-batch-clear" data-batch-action disabled>取消选择</button>
+              </div>
+              <div class="wr-main-actions">
+                <button type="button" class="btn btn--filled" data-action="wr-new">
+                  <svg class="icon icon--sm" aria-hidden="true"><use href="#i-plus"/></svg>新建条目
+                </button>
+                <button type="button" class="btn btn--gray" data-action="wr-test">
+                  <svg class="icon icon--sm" aria-hidden="true"><use href="#i-flask"/></svg>匹配测试
+                </button>
+                <button type="button" class="btn btn--gray" data-action="wr-export">
+                  <svg class="icon icon--sm" aria-hidden="true"><use href="#i-download"/></svg>导出
+                </button>
+                <label class="btn btn--gray file-btn">
+                  <svg class="icon icon--sm" aria-hidden="true"><use href="#i-upload"/></svg>导入
+                  <input type="file" accept=".json" data-file="wr-import" aria-label="导入素材 JSON">
+                </label>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="page page--bar">
+        <div class="stats" id="wrStats"><span class="skeleton" style="width:200px"></span></div>
+
+        <div class="wr-grid" id="wrGrid" aria-live="polite">
+          <div class="skeleton skeleton-card"></div>
+          <div class="skeleton skeleton-card"></div>
+          <div class="skeleton skeleton-card"></div>
+        </div>
+      </div>
+
+      <div class="pager-bar">
+        <div class="pager-bar-inner">
+          <div class="pager" id="wrPager"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───── 世界书 ───── -->
+    <section class="tab-pane" id="pane-wb" role="region" aria-label="世界书">
+      <div class="page-head-bar">
+        <div class="page-head-bar-inner">
+          <div class="page-head">
+            <h2>世界书</h2>
+            <span class="page-sub" id="wbSub"></span>
+          </div>
+
+          <div class="toolbar">
+            <label class="search" style="min-width:min(220px, 100%)">
+              <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+              <input type="search" id="wbSearch" placeholder="搜索世界书名称或描述" aria-label="搜索世界书">
+              <button type="button" class="search-clear" data-action="clear-search" data-target="wbSearch" aria-label="清除搜索">
+                <svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>
+              </button>
+            </label>
+            <label class="check nowrap">
+              <input type="checkbox" id="wbOnlyConst">
+              <span>仅常驻</span>
+            </label>
+            <span class="grow"></span>
+            <div class="toolbar-actions">
+              <button type="button" class="btn btn--filled" data-action="wb-new">
+                <svg class="icon icon--sm" aria-hidden="true"><use href="#i-plus"/></svg>新建世界书
+              </button>
+              <label class="btn btn--gray file-btn">
+                <svg class="icon icon--sm" aria-hidden="true"><use href="#i-upload"/></svg>导入
+                <input type="file" accept=".json" data-file="wb-import" aria-label="导入世界书 JSON">
+              </label>
+              <button type="button" class="btn btn--gray" data-action="wb-export-st">
+                <svg class="icon icon--sm" aria-hidden="true"><use href="#i-download"/></svg>导出 ST
+              </button>
+              <button type="button" class="btn btn--gray" data-action="wb-reload">
+                <svg class="icon icon--sm" aria-hidden="true"><use href="#i-refresh"/></svg>刷新
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="page page--bar">
+        <div class="stats" id="wbStats"><span class="skeleton" style="width:180px"></span></div>
+
+        <div id="wbList" aria-live="polite">
+          <div class="skeleton skeleton-row" style="margin-bottom:8px"></div>
+          <div class="skeleton skeleton-row" style="margin-bottom:8px"></div>
+          <div class="skeleton skeleton-row"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───── 角色卡 ───── -->
+    <section class="tab-pane" id="pane-persona" role="region" aria-label="角色卡">
+      <div class="page-head-bar">
+        <div class="page-head-bar-inner">
+          <div class="page-head">
+            <h2>角色卡</h2>
+            <span class="page-sub" id="personaSub"></span>
+          </div>
+
+          <div class="toolbar">
+            <label class="search" style="min-width:min(220px, 100%)">
+              <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+              <input type="search" id="personaSearch" placeholder="搜索角色卡名称" aria-label="搜索角色卡">
+              <button type="button" class="search-clear" data-action="clear-search" data-target="personaSearch" aria-label="清除搜索">
+                <svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>
+              </button>
+            </label>
+            <div class="segmented segmented--icon" role="group" aria-label="视图切换">
+              <button type="button" id="personaGrid" class="is-selected" data-action="persona-view" data-value="grid" title="网格视图" aria-label="网格视图">
+                <svg class="icon icon--sm" aria-hidden="true"><use href="#i-grid"/></svg>
+              </button>
+              <button type="button" id="personaListBtn" data-action="persona-view" data-value="list" title="列表视图" aria-label="列表视图">
+                <svg class="icon icon--sm" aria-hidden="true"><use href="#i-list"/></svg>
+              </button>
+            </div>
+            <span class="grow"></span>
+            <div class="toolbar-actions">
+              <button type="button" class="btn btn--filled" data-action="persona-new">
+                <svg class="icon icon--sm" aria-hidden="true"><use href="#i-plus"/></svg>新建角色卡
+              </button>
+              <label class="btn btn--gray file-btn">
+                <svg class="icon icon--sm" aria-hidden="true"><use href="#i-upload"/></svg>导入 V2
+                <input type="file" accept=".png,.jpg,.jpeg,.webp,.json" data-file="persona-import" aria-label="导入角色卡">
+              </label>
+              <button type="button" class="btn btn--gray" data-action="persona-import-text">文本导入</button>
+              <button type="button" class="btn btn--gray" data-action="persona-refresh">
+                <svg class="icon icon--sm" aria-hidden="true"><use href="#i-refresh"/></svg>刷新
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="page page--bar">
+        <div class="stats" id="personaStats"><span class="skeleton" style="width:160px"></span></div>
+
+        <div id="personaList" aria-live="polite">
+          <div class="skeleton skeleton-row" style="margin-bottom:8px"></div>
+          <div class="skeleton skeleton-row"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───── 文档知识库 ───── -->
+    <section class="tab-pane" id="pane-rag" role="region" aria-label="文档知识库">
+      <div class="page">
+        <div class="page-head">
+          <h2>文档知识库</h2>
+          <span class="page-sub" id="ragSub"></span>
+        </div>
+
+        <div class="cfg-cols rag-overview" style="margin-bottom:var(--sp-4)">
+          <div class="card">
+            <div class="card-head"><h3>向量模型</h3></div>
+            <div class="card-body"><div class="card-body-inner" id="ragModelInfo">
+              <span class="skeleton" style="width:220px"></span>
+            </div></div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h3>文档统计</h3></div>
+            <div class="card-body"><div class="card-body-inner">
+              <div class="stat-grid">
+                <div class="stat-cell"><div class="stat-cell-value" id="ragStatDocs">—</div><div class="stat-cell-label">文档数</div></div>
+                <div class="stat-cell"><div class="stat-cell-value" id="ragStatChunks">—</div><div class="stat-cell-label">总分块</div></div>
+                <div class="stat-cell"><div class="stat-cell-value" id="ragStatVectors">—</div><div class="stat-cell-label">向量数</div></div>
+              </div>
+              <div class="note" style="margin-top:var(--sp-4)">
+                分块大小、重叠与注入条数等策略，请前往「配置 → RAG 与动态记忆」调整。
+              </div>
+            </div></div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom:var(--sp-4)">
+          <div class="card-head"><h3>文档管理</h3><span class="card-head-sub">支持 .txt / .md / .pdf</span></div>
+          <div class="card-body"><div class="card-body-inner">
+            <div class="dropzone" id="ragDrop" role="button" tabindex="0" aria-label="上传文档">
+              <svg class="icon icon--xl" aria-hidden="true"><use href="#i-upload"/></svg>
+              <div>拖拽文件到此处，或点击选择（支持多选）</div>
+              <input type="file" id="ragFile" accept=".txt,.md,.pdf" multiple hidden aria-label="选择文档">
+            </div>
+            <div id="ragUploadStatus" class="fs-13 t2" style="margin-top:var(--sp-3);text-align:center" role="status"></div>
+            <div class="group-title">已上传文档</div>
+            <div id="ragDocList"><span class="skeleton" style="width:220px"></span></div>
+          </div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>知识库检索</h3><span class="card-head-sub">验证召回效果</span></div>
+          <div class="card-body"><div class="card-body-inner">
+            <div class="search-layout">
+              <div class="search-main">
+                <textarea class="field" id="ragQuery" rows="4" placeholder="输入查询文本，测试知识库召回效果（Enter 检索，Shift+Enter 换行）" aria-label="检索内容"></textarea>
+              </div>
+              <div class="search-side">
+                <div class="form-group">
+                  <label for="ragTopK">返回结果数量</label>
+                  <div class="cfg-inline">
+                    <div class="unit-wrap"><input class="field" type="number" id="ragTopK" value="5" min="1" max="20"><span class="unit">条</span></div>
+                  </div>
+                </div>
+                <button type="button" class="btn btn--filled btn--block" data-action="rag-search">检索</button>
+              </div>
+            </div>
+            <div id="ragResults" style="margin-top:var(--sp-4)"></div>
+          </div></div>
+        </div>
+
+        <div class="page-foot">
+          界面字体：使用各系统自带字体（macOS 的 SF Pro / 苹方、Windows 的微软雅黑 / Segoe UI、Linux 的 Noto Sans SC），不加载外部字体资源。
+        </div>
+      </div>
+    </section>
+
+    <!-- ───── 动态记忆 ───── -->
+    <section class="tab-pane" id="pane-memory" role="region" aria-label="动态记忆">
+      <div class="page">
+        <div class="page-head">
+          <h2>动态记忆</h2>
+          <span class="page-sub" id="memSub"></span>
+        </div>
+
+        <div class="seg-nav">
+          <div class="segmented" role="tablist" aria-label="记忆子页">
+            <button type="button" class="is-selected" data-memsub="overview" role="tab" aria-selected="true" aria-controls="mem-overview" id="memsub-overview">系统总览</button>
+            <button type="button" data-memsub="browser" role="tab" aria-selected="false" aria-controls="mem-browser" id="memsub-browser">记忆浏览</button>
+            <button type="button" data-memsub="logs" role="tab" aria-selected="false" aria-controls="mem-logs" id="memsub-logs">对话日志</button>
+            <button type="button" data-memsub="vector" role="tab" aria-selected="false" aria-controls="mem-vector" id="memsub-vector">向量检索</button>
+            <button type="button" data-memsub="io" role="tab" aria-selected="false" aria-controls="mem-io" id="memsub-io">导入导出</button>
+          </div>
+        </div>
+
+        <div class="mem-sub is-active" id="mem-overview" role="tabpanel" aria-labelledby="memsub-overview">
+          <div class="dash-grid" style="margin-bottom:var(--sp-4)">
+            <div class="dash-card" data-tone="blue">
+              <div class="dash-value" id="dashTotal">—</div>
+              <div class="dash-label">记忆总数</div>
+              <div class="dash-track"><div class="dash-fill" id="dashBarTotal"></div></div>
+            </div>
+            <div class="dash-card" data-tone="green">
+              <div class="dash-value" id="dashSessions">—</div>
+              <div class="dash-label">活跃会话</div>
+              <div class="dash-track"><div class="dash-fill" id="dashBarSessions"></div></div>
+            </div>
+            <div class="dash-card" data-tone="indigo">
+              <div class="dash-value" id="dashIndex">—</div>
+              <div class="dash-label">向量索引 <span class="t3">NumPy</span></div>
+              <div class="dash-track"><div class="dash-fill" id="dashBarIndex"></div></div>
+            </div>
+            <div class="dash-card" data-tone="orange">
+              <div class="dash-value" id="dashToday">—</div>
+              <div class="dash-label">今日新增</div>
+              <div class="dash-track"><div class="dash-fill" id="dashBarToday"></div></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h3>提供商配置</h3></div>
+            <div class="card-body"><div class="card-body-inner" id="memProvider">
+              <span class="skeleton" style="width:220px"></span>
+            </div></div>
+          </div>
+        </div>
+
+        <div class="mem-sub" id="mem-browser" role="tabpanel" aria-labelledby="memsub-browser">
+          <div class="card">
+            <div class="card-head">
+              <h3>记忆浏览</h3>
+              <span class="grow"></span>
+              <button type="button" class="btn btn--sm btn--gray" data-action="mem-prune">修剪低分记忆</button>
+            </div>
+            <div class="card-body"><div class="card-body-inner">
+              <div class="form-row">
+                <div class="form-group" style="flex:1">
+                  <label for="memSession">会话</label>
+                  <select class="field" id="memSession">
+                    <option value="">全部会话</option>
+                  </select>
+                </div>
+                <div class="form-group" style="flex:1">
+                  <label for="memFilter">按 Session ID 精确筛选</label>
+                  <input class="field" type="search" id="memFilter" placeholder="选定会话时此项禁用">
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table class="data">
+                  <thead><tr><th style="width:190px">会话</th><th>摘要</th><th style="width:130px">创建时间</th><th style="width:190px">操作</th></tr></thead>
+                  <tbody id="memTbody"></tbody>
+                </table>
+              </div>
+              <div class="pager">
+                <span class="pager-info" id="memPageInfo"></span>
+                <div class="pager-nav">
+                  <button type="button" class="btn btn--sm btn--gray" id="memPrev" data-action="mem-page" data-value="-1">上一页</button>
+                  <button type="button" class="btn btn--sm btn--gray" id="memNext" data-action="mem-page" data-value="1">下一页</button>
+                </div>
+              </div>
+            </div></div>
+          </div>
+        </div>
+
+        <div class="mem-sub" id="mem-logs" role="tabpanel" aria-labelledby="memsub-logs">
+          <div class="card">
+            <div class="card-head"><h3>对话日志</h3><span class="card-head-sub">最近 200 条</span></div>
+            <div class="card-body"><div class="card-body-inner">
+              <div class="cfg-inline" style="margin-bottom:var(--sp-3)">
+                <input class="field grow" type="text" id="logSession" placeholder="Session ID（target 或 target::persona）" aria-label="Session ID" style="max-width:none">
+                <button type="button" class="btn btn--filled" data-action="log-load">加载</button>
+                <button type="button" class="btn btn--gray" data-action="log-export" data-value="markdown">导出 Markdown</button>
+                <button type="button" class="btn btn--gray" data-action="log-export" data-value="txt">导出 TXT</button>
+              </div>
+              <div class="note" style="margin-bottom:var(--sp-3)">
+                需先在「配置 → RAG 与动态记忆」开启「保存原始对话日志」，激活中的 RP 对话才会按会话记录于此，供断点续传与回看。
+              </div>
+              <div class="table-wrap">
+                <table class="data">
+                  <thead><tr><th style="width:62px">角色</th><th>内容</th><th style="width:150px">时间</th></tr></thead>
+                  <tbody id="logTbody"><tr><td colspan="3" class="t3" style="text-align:center">输入 Session ID 后加载</td></tr></tbody>
+                </table>
+              </div>
+            </div></div>
+          </div>
+        </div>
+
+        <div class="mem-sub" id="mem-vector" role="tabpanel" aria-labelledby="memsub-vector">
+          <div class="card">
+            <div class="card-head"><h3>向量检索</h3><span class="card-head-sub">调试用</span></div>
+            <div class="card-body"><div class="card-body-inner">
+              <div class="cfg-inline">
+                <input class="field grow" type="text" id="vecQuery" placeholder="输入查询文本" aria-label="向量检索内容" style="max-width:none">
+                <button type="button" class="btn btn--filled" data-action="vec-search">检索</button>
+              </div>
+              <pre id="vecRaw" class="mono fs-12" hidden style="margin-top:var(--sp-3);padding:var(--sp-3);border-radius:var(--r-sm);background:var(--bg-secondary);overflow-x:auto;max-height:260px"></pre>
+              <div id="vecResults" style="margin-top:var(--sp-3)"></div>
+            </div></div>
+          </div>
+        </div>
+
+        <div class="mem-sub" id="mem-io" role="tabpanel" aria-labelledby="memsub-io">
+          <div class="cfg-cols">
+            <div class="card">
+              <div class="card-head"><h3>备份记忆库</h3></div>
+              <div class="card-body"><div class="card-body-inner">
+                <p class="row-desc">将当前所有动态记忆导出为 JSON 文件。</p>
+                <button type="button" class="btn btn--filled" data-action="mem-export" style="margin-top:var(--sp-3)">
+                  <svg class="icon icon--sm" aria-hidden="true"><use href="#i-download"/></svg>导出 JSON
+                </button>
+              </div></div>
+            </div>
+            <div class="card">
+              <div class="card-head"><h3>恢复记忆库</h3></div>
+              <div class="card-body"><div class="card-body-inner">
+                <p class="row-desc">从 JSON 文件导入，会与现有记忆库合并。</p>
+                <label class="btn btn--gray file-btn" style="margin-top:var(--sp-3)">
+                  <svg class="icon icon--sm" aria-hidden="true"><use href="#i-upload"/></svg>选择 JSON 文件
+                  <input type="file" accept=".json" data-file="mem-import" aria-label="导入记忆 JSON">
+                </label>
+              </div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───── 配置 ───── -->
+    <section class="tab-pane" id="pane-config" role="region" aria-label="配置">
+      <div class="page-head-bar">
+        <div class="page-head-bar-inner">
+        <div class="page-head">
+          <h2>配置</h2>
+          <span class="page-sub">修改后需点击底部「保存」提交</span>
+        </div>
+
+        <nav class="cfg-nav" aria-label="配置分区">
+          <div class="toolbar cfg-nav-inner">
+            <div class="cfg-nav-list" id="cfgNav">
+              <button type="button" class="is-selected" data-target="sec-inject" aria-current="true">注入引擎</button>
+              <button type="button" data-target="sec-statusbar">状态栏</button>
+              <button type="button" data-target="sec-rag">RAG 与记忆</button>
+              <button type="button" data-target="sec-session">会话与输出</button>
+              <button type="button" data-target="sec-system">系统与安全</button>
+            </div>
+            <label class="search" style="flex:0 1 210px;min-width:120px">
+              <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+              <input type="search" id="configSearchInput" placeholder="搜索配置项" aria-label="搜索配置项">
+              <button type="button" class="search-clear" data-action="clear-search" data-target="configSearchInput" aria-label="清除搜索">
+                <svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>
+              </button>
+            </label>
+          </div>
+        </nav>
+        </div>
+      </div>
+
+      <div class="page">
+        <!-- ══ 1. 注入引擎 ══ -->
+        <section class="cfg-section" id="sec-inject">
+          <div class="cfg-section-head">
+            <h2>注入引擎</h2>
+            <span class="cfg-section-sub">世界书 · 素材库 · 输出控制 · 反拒绝</span>
+          </div>
+
+          <div class="cfg-cols">
+            <div class="cfg-col">
+  <div class="card">
+                <div class="card-head">
+                  <h3>世界书注入策略</h3>
+                </div>
+                <div class="card-body"><div class="card-body-inner">
+                  <div class="cfg-row">
+                    <div class="cfg-row-text"><div class="cfg-row-title">启用世界书匹配</div></div>
+                    <div class="cfg-row-control">
+                      <label class="switch"><input type="checkbox" id="c-wb-enabled"><span class="switch-track"></span></label>
+                    </div>
+                  </div>
+                  <div class="cfg-field">
+                    <label class="cfg-field-label" for="c-wb-token">注入 Token 估算上限</label>
+                    <div class="unit-wrap"><input class="field" type="number" id="c-wb-token" value="4000"><span class="unit">token</span></div>
+                    <span class="hint">建议 3000–4000。过高会挤占上下文，导致模型忽略状态栏。</span>
+                  </div>
+                  <div class="cfg-field">
+                    <label class="cfg-field-label" for="c-wb-max">单次触发条目上限</label>
+                    <div class="unit-wrap"><input class="field" type="number" id="c-wb-max" value="4"><span class="unit">条</span></div>
+                  </div>
+                  <div class="cfg-field">
+                    <label class="cfg-field-label" for="c-wb-pos">提示词注入位置</label>
+                    <select class="field field--wide" id="c-wb-pos" data-seg="1">
+                      <option value="user_prefix" data-short="贴脸输出">贴脸输出（user_prefix）— 推荐</option>
+                      <option value="system_end" data-short="系统末尾">系统末尾（system_end）</option>
+                    </select>
+                    <span class="hint">贴脸输出：注入在用户消息前，模型注意力最强，推荐。系统末尾：追加到系统提示词尾部。</span>
+                  </div>
+                  <div class="cfg-field">
+                    <label class="cfg-field-label" for="c-wb-sens">匹配灵敏度</label>
+                    <div class="slider">
+                      <input type="range" id="c-wb-sens" min="0" max="1" step="0.1" value="0.7">
+                      <span class="slider-value" id="c-wb-sens-val">0.7</span>
+                    </div>
+                  </div>
+                  <div class="cfg-row">
+                    <div class="cfg-row-text">
+                      <div class="cfg-row-title">全局常驻激活</div>
+                      <div class="cfg-row-desc">每次对话强制注入系统提示词与状态栏，无需触发词。适合纯 RP 场景。</div>
+                    </div>
+                    <div class="cfg-row-control">
+                      <label class="switch"><input type="checkbox" id="c-wb-always"><span class="switch-track"></span></label>
+                    </div>
+                  </div>
+                  <div class="cfg-row">
+                    <div class="cfg-row-text">
+                      <div class="cfg-row-title">显示触发日志</div>
+                      <div class="cfg-row-desc">在 /info 指令中显示最新命中的词条（调试用）。</div>
+                    </div>
+                    <div class="cfg-row-control">
+                      <label class="switch"><input type="checkbox" id="c-wb-show-log"><span class="switch-track"></span></label>
+                    </div>
+                  </div>
+                </div></div>
+              </div>
+
+  <div class="card">
+                <div class="card-head">
+                  <h3>表现控制</h3>
+                </div>
+                <div class="card-body"><div class="card-body-inner">
+                  <div class="cfg-field">
+                    <label class="cfg-field-label" for="c-perf-min">强制回复最低字数</label>
+                    <div class="unit-wrap"><input class="field" type="number" id="c-perf-min" value="400"><span class="unit">字</span></div>
+                    <span class="hint">建议 400–800，防止模型越写越短。</span>
+                  </div>
+                  <div class="cfg-field">
+                    <label class="cfg-field-label" for="c-perf-max">要求回复最高字数</label>
+                    <div class="unit-wrap"><input class="field" type="number" id="c-perf-max" value="0"><span class="unit">字</span></div>
+                    <span class="hint">填 0 表示不限制。用于防止模型无限发散。</span>
+                  </div>
+                  <div class="cfg-field">
+                    <label class="cfg-field-label" for="c-perf-max-prompt">提示词硬截断上限</label>
+                    <div class="unit-wrap"><input class="field" type="number" id="c-perf-max-prompt" value="50000"><span class="unit">字符</span></div>
+                    <span class="hint">总提示词的安全上限。内容过多时按优先级丢弃次要素材，常驻协议不会被截掉。</span>
+                  </div>
+                </div></div>
+              </div>
+            </div>
+            <div class="cfg-col">
+  <div class="card">
+                <div class="card-head">
+                  <h3>写作素材库控制</h3>
+                </div>
+                <div class="card-body"><div class="card-body-inner">
+                  <div class="cfg-row">
+                    <div class="cfg-row-text"><div class="cfg-row-title">启用素材库指引</div></div>
+                    <div class="cfg-row-control">
+                      <label class="switch"><input type="checkbox" id="c-wr-enabled"><span class="switch-track"></span></label>
+                    </div>
+                  </div>
+                  <div class="cfg-field">
+                    <label class="cfg-field-label" for="c-wr-max">最大注入条数</label>
+                    <div class="unit-wrap"><input class="field" type="number" id="c-wr-max" value="4"><span class="unit">条</span></div>
+                  </div>
+                  <div class="cfg-field">
+                    <label class="cfg-field-label" for="c-wr-fallback">无匹配时保底回退条数</label>
+                    <div class="unit-wrap"><input class="field" type="number" id="c-wr-fallback" value="2"><span class="unit">条</span></div>
+                  </div>
+                  <div class="cfg-field">
+                    <label class="cfg-field-label" for="c-wr-dedup">同分类去重上限</label>
+                    <div class="unit-wrap"><input class="field" type="number" id="c-wr-dedup" value="3"><span class="unit">条</span></div>
+                  </div>
+                </div></div>
+              </div>
+
+  <div class="card">
+                <div class="card-head">
+                  <h3>应急反拒绝协议</h3>
+                </div>
+                <div class="card-body"><div class="card-body-inner">
+                  <div class="cfg-row">
+                    <div class="cfg-row-text"><div class="cfg-row-title">启用拒绝阻断检测</div></div>
+                    <div class="cfg-row-control">
+                      <label class="switch"><input type="checkbox" id="c-ref-enabled"><span class="switch-track"></span></label>
+                    </div>
+                  </div>
+                  <div class="cfg-field">
+                    <label class="cfg-field-label" for="c-ref-pat">触发拦截词（每行一个）</label>
+                    <textarea class="field field--wide" id="c-ref-pat" rows="6"></textarea>
+                  </div>
+                </div></div>
+              </div>
+            </div>
+          </div>
+
+        <!-- ══ 2. 状态栏 ══ -->
+        <section class="cfg-section" id="sec-statusbar">
+          <div class="cfg-section-head">
+            <h2>状态栏</h2>
+            <span class="cfg-section-sub">沉浸式属性追踪（<span class="cfg-sub-danger">实验性</span>）</span>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <h3>状态栏配置</h3>
+            </div>
+            <div class="card-body"><div class="card-body-inner">
+              <!-- 双列：左列是逐个设置项（行紧凑），右列专给 Markdown 模板。
+                   模板是要真正手写多行 markdown + {content} 的编辑器，
+                   挤在 420px 宽、3 行的框里没法用；给它整列宽度与高度后
+                   才能一眼看到八行模板内容。 -->
+              <div class="sb-layout">
+                <div class="sb-col">
+                  <div class="cfg-row">
+                    <div class="cfg-row-text">
+                      <div class="cfg-row-title">启用状态栏</div>
+                      <div class="cfg-row-desc warn">受大模型稀疏注意力机制影响，稳定性有限，切换后不保证每次生效。</div>
+                    </div>
+                    <div class="cfg-row-control">
+                      <label class="switch"><input type="checkbox" id="c-sb-enabled"><span class="switch-track"></span></label>
+                    </div>
+                  </div>
+                  <div class="cfg-field">
+                    <label class="cfg-field-label" for="c-sb-fields">状态栏字段（用 | 分隔，建议 6 个）</label>
+                    <input class="field field--wide" type="text" id="c-sb-fields" value="好感度|关系阶段|心情|位置|穿着|当前想法">
+                  </div>
+                  <div class="cfg-field">
+                    <label class="cfg-field-label" for="c-sb-plots">剧情走向选项（用 | 分隔）</label>
+                    <input class="field field--wide" type="text" id="c-sb-plots" value="继续当前话题|转换场景|结束互动">
+                    <span class="hint">留空则不显示该行。</span>
+                  </div>
+                  <div class="cfg-field">
+                    <label class="cfg-field-label" for="c-sb-placeholder">缺省占位符</label>
+                    <input class="field" type="text" id="c-sb-placeholder" value="未设置" maxlength="12">
+                    <span class="hint">字段未匹配到值时显示的文本，例如「未知」「—」。</span>
+                  </div>
+                  <div class="cfg-row cfg-row--stack">
+                    <div class="cfg-row-text">
+                      <div class="cfg-row-title">标注字段变化</div>
+                      <div class="cfg-row-desc">可量化的字段（如好感度）相对上一轮的变化会带标注，形如「好感度：84/100（↑2）」。文本字段（心情、位置、当前想法）不加标注——它们每轮都在变，新值本身即信息，挂箭头只会淹没真正有价值的数值变化。</div>
+                    </div>
+                    <div class="cfg-row-control">
+                      <label class="switch"><input type="checkbox" id="c-sb-delta"><span class="switch-track"></span></label>
+                    </div>
+                  </div>
+                  <div class="cfg-row cfg-row--stack">
+                    <div class="cfg-row-text">
+                      <div class="cfg-row-title">LLM 智能提取</div>
+                      <div class="cfg-row-desc warn">当状态栏格式完全不合规、5 级解析全部失败时，额外调用一次轻量 LLM 提取字段（3 秒超时）。开启后每次失败都会多消耗一次 LLM 调用。</div>
+                    </div>
+                    <div class="cfg-row-control">
+                      <label class="switch"><input type="checkbox" id="c-sb-llm-extract"><span class="switch-track"></span></label>
+                    </div>
+                  </div>
+                  <div class="cfg-field">
+                    <label class="cfg-field-label" for="c-sb-llm">状态栏提取 LLM 模型</label>
+                    <select class="field field--wide" id="c-sb-llm"></select>
+                    <span class="hint">留空则回退到 RAG 摘要 LLM。建议选择轻量、便宜的模型。</span>
+                  </div>
+                  <!-- ── JEV 模式（TypeSafe System One 结构化判定）── -->
+                  <div class="cfg-row cfg-row--stack">
+                    <div class="cfg-row-text">
+                      <div class="cfg-row-title">JEV 模式（剧情走向推荐选择度）</div>
+                      <div class="cfg-row-desc">开启后，剧情走向选项会附带「剧情倾向」百分比（如「2. 转换场景 ▸ 62%」）；你用自由文字回复时，插件会自动判定你选择了哪个分支并明确告知模型，不再靠模型自己猜。判定由 TypeSafe Jev（System One）结构化模型完成，每轮回复前多一次判定调用（约 1–3 秒）；判定失败或置信度不足时自动回退普通渲染，不影响聊天。</div>
+                      <div class="cfg-row-desc warn">⚠ 必须选择指向 TypeSafe（api.typesafe.ai）的 Jev 类模型提供商（模型名如 jev-latest / jev-1.13）。普通对话模型没有 /systemone 接口，选错会静默降级为普通渲染。开启即表示你知悉并接受：对话文本将发送至 api.typesafe.ai 做结构化判定。</div>
+                    </div>
+                    <div class="cfg-row-control">
+                      <label class="switch"><input type="checkbox" id="c-sb-jev"><span class="switch-track"></span></label>
+                    </div>
+                  </div>
+                  <div class="cfg-field">
+                    <label class="cfg-field-label" for="c-sb-jev-provider">JEV 判定模型（AstrBot 提供商）</label>
+                    <select class="field field--wide" id="c-sb-jev-provider"></select>
+                    <span class="hint">先在 AstrBot「模型提供商」新建一个 openai_compatible 提供商：API 地址填 <code>https://api.typesafe.ai/v1</code>，密钥填 TypeSafe API Key，模型填 <code>jev-latest</code>，再回到这里选中它。</span>
+                  </div>
+                  <div class="cfg-field">
+                    <label class="cfg-field-label" for="c-sb-jev-floor">推荐选择度显示阈值</label>
+                    <input class="field" type="number" id="c-sb-jev-floor" min="0" max="1" step="0.05" value="0.6">
+                    <span class="hint">判定置信度低于该值时不显示百分比、不做分支路由（分布平坦时数字没有信息量）。范围 0–1，默认 0.6。</span>
+                  </div>
+                </div>
+                <div class="sb-col sb-col--tpl">
+                  <div class="cfg-field">
+                    <label class="cfg-field-label" for="c-sb-tpl">渲染 Markdown 模板</label>
+                    <textarea class="field mono fs-13" id="c-sb-tpl" rows="8" spellcheck="false"></textarea>
+                    <span class="hint">可用占位符 <code>{content}</code> 代表渲染后的状态栏正文。用于会渲染 Markdown 的平台（Discord、WebChat、飞书等）。</span>
+                  </div>
+                  <div class="cfg-field">
+                    <label class="cfg-field-label" for="c-sb-tpl-plain">纯文本平台模板</label>
+                    <textarea class="field mono fs-13" id="c-sb-tpl-plain" rows="4" spellcheck="false"></textarea>
+                    <span class="hint">QQ、微信这类不渲染 Markdown 的平台用这份。默认模板里的 <code>**</code> 与 <code>```</code> 在这些平台会原样显示给用户，故改用分隔线排版。</span>
+                  </div>
+                  <div class="cfg-field">
+                    <label class="cfg-field-label" for="c-sb-plain-plat">按纯文本渲染的平台</label>
+                    <input class="field field--wide" type="text" id="c-sb-plain-plat" spellcheck="false" placeholder="留空使用内置默认">
+                    <span class="hint">AstrBot 适配器名，用 <code>|</code> 分隔。留空默认包含 aiocqhttp、qq_official、wecom、dingtalk 等；未知平台一律走 Markdown 模板。</span>
+                  </div>
+                </div>
+              </div>
+            </div></div>
+          </div>
+        </section>
+
+        <!-- ══ 3. RAG 与动态记忆 ══ -->
+        <section class="cfg-section" id="sec-rag">
+          <div class="cfg-section-head">
+            <h2>RAG 与动态记忆</h2>
+            <span class="cfg-section-sub">文档知识库与长期记忆</span>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <h3>向量与模型</h3>
+            </div>
+            <div class="card-body"><div class="card-body-inner">
+              <div class="cfg-field">
+                <label class="cfg-field-label" for="c-rag-emb">Embedding 模型</label>
+                <select class="field field--wide" id="c-rag-emb"></select>
+                <span class="hint">用于文本向量化。留空使用本地 bge-small。切换提供商会改变向量维度，已上传文档需重新上传。</span>
+              </div>
+              <div class="cfg-row">
+                <div class="cfg-row-text">
+                  <div class="cfg-row-title">允许本地 Embedding 回退</div>
+                  <div class="cfg-row-desc">API 向量模型不可用时，自动使用本地 bge-small 模型。</div>
+                </div>
+                <div class="cfg-row-control">
+                  <label class="switch"><input type="checkbox" id="c-rag-local"><span class="switch-track"></span></label>
+                </div>
+              </div>
+              <div class="cfg-field">
+                <label class="cfg-field-label" for="c-rag-rerank">Rerank 重排模型</label>
+                <select class="field field--wide" id="c-rag-rerank"></select>
+                <span class="hint">对向量初筛结果二次打分，明显提升检准率。建议配置。</span>
+              </div>
+              <div class="cfg-field">
+                <label class="cfg-field-label" for="c-rag-llm">摘要 LLM 模型</label>
+                <select class="field field--wide" id="c-rag-llm"></select>
+                <span class="hint">后台把长对话压缩为记忆摘要。留空则退化为按长度截断。</span>
+              </div>
+              <div class="cfg-field">
+                <label class="cfg-field-label" for="c-rag-chunk">文档分块大小</label>
+                <div class="unit-wrap"><input class="field" type="number" id="c-rag-chunk" value="500"><span class="unit">字符</span></div>
+              </div>
+              <div class="cfg-field">
+                <label class="cfg-field-label" for="c-rag-overlap">分块重叠字数</label>
+                <div class="unit-wrap"><input class="field" type="number" id="c-rag-overlap" value="50"><span class="unit">字符</span></div>
+              </div>
+              <div class="cfg-field">
+                <label class="cfg-field-label" for="c-rag-topk">最终注入条数</label>
+                <div class="unit-wrap"><input class="field" type="number" id="c-rag-topk" value="3"><span class="unit">条</span></div>
+              </div>
+              <div class="cfg-field">
+                <label class="cfg-field-label" for="c-rag-dense-topk">向量粗排召回条数</label>
+                <div class="unit-wrap"><input class="field" type="number" id="c-rag-dense-topk" value="5"><span class="unit">条</span></div>
+                <span class="hint">先召回候选，再交给重排模型精筛；建议为最终注入条数的 2-3 倍。</span>
+              </div>
+            </div></div>
+          </div>
+
+          <div class="card" style="margin-top:var(--sp-4)">
+            <div class="card-head">
+              <h3>记忆与日志</h3>
+            </div>
+            <div class="card-body"><div class="card-body-inner">
+              <div class="cfg-row">
+                <div class="cfg-row-text">
+                  <div class="cfg-row-title">启用动态记忆</div>
+                  <div class="cfg-row-desc">后台自动提取历史，并跨会话保留。</div>
+                </div>
+                <div class="cfg-row-control">
+                  <label class="switch"><input type="checkbox" id="c-rag-memory"><span class="switch-track"></span></label>
+                </div>
+              </div>
+              <div class="cfg-row">
+                <div class="cfg-row-text">
+                  <div class="cfg-row-title">启用全自动闲时反思</div>
+                  <div class="cfg-row-desc">闲置时自动抽取并提纯累积的对话记录。</div>
+                </div>
+                <div class="cfg-row-control">
+                  <label class="switch"><input type="checkbox" id="c-rag-autonomous-reflection"><span class="switch-track"></span></label>
+                </div>
+              </div>
+              <div class="cfg-row">
+                <div class="cfg-row-text">
+                  <div class="cfg-row-title">保存原始对话日志</div>
+                  <div class="cfg-row-desc">用于导出剧本与增量学习。</div>
+                </div>
+                <div class="cfg-row-control">
+                  <label class="switch"><input type="checkbox" id="c-rag-log"><span class="switch-track"></span></label>
+                </div>
+              </div>
+              <div class="cfg-field">
+                <label class="cfg-field-label" for="c-rag-log-days">日志保留天数</label>
+                <div class="unit-wrap"><input class="field" type="number" id="c-rag-log-days" value="30"><span class="unit">天</span></div>
+              </div>
+            </div></div>
+          </div>
+        </section>
+
+        <!-- ══ 4. 会话与输出 ══ -->
+        <section class="cfg-section" id="sec-session">
+          <div class="cfg-section-head">
+            <h2>会话与输出</h2>
+            <span class="cfg-section-sub">流式模式批量控制 · 会话级操作，即时生效</span>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <h3>流式输出控制</h3>
+            </div>
+            <div class="card-body"><div class="card-body-inner">
+              <div class="cfg-row">
+                <div class="cfg-row-text">
+                  <div class="cfg-row-title">当前会话分布</div>
+                  <div class="cfg-row-desc" id="streamStats">加载中…</div>
+                </div>
+              </div>
+              <div class="cfg-field">
+                <label class="cfg-field-label">批量设置所有会话</label>
+                <div class="row-wrap">
+                  <button type="button" class="btn btn--sm btn--gray" data-action="stream-all" data-value="auto">自动</button>
+                  <button type="button" class="btn btn--sm btn--gray" data-action="stream-all" data-value="on">强制流式</button>
+                  <button type="button" class="btn btn--sm btn--gray" data-action="stream-all" data-value="off">强制关闭</button>
+                </div>
+                <span class="hint">auto＝激活时关闭（默认）；on＝始终流式；off＝始终非流式。仅影响已有会话，新会话默认 auto；单聊可用 /stream 指令覆盖。</span>
+              </div>
+            </div></div>
+          </div>
+        </section>
+
+        <!-- ══ 5. 系统与安全 ══ -->
+        <section class="cfg-section" id="sec-system">
+          <div class="cfg-section-head">
+            <h2>系统与安全</h2>
+            <span class="cfg-section-sub">健康度 · 权限 · 调试 · 备份</span>
+          </div>
+
+          <div class="cfg-cols">
+            <div class="card">
+              <div class="card-head">
+                <h3>系统健康度</h3>
+              </div>
+              <div class="card-body"><div class="card-body-inner" style="padding-top:2px">
+                <div class="health-row">
+                  <span class="health-name">RAG 检索成功率</span>
+                  <span class="health-rate" id="health-rag-rate">—</span>
+                  <span class="health-detail" id="health-rag-detail">— / —</span>
+                </div>
+                <div class="health-row">
+                  <span class="health-name">状态栏解析成功率</span>
+                  <span class="health-rate" id="health-status-rate">—</span>
+                  <span class="health-detail" id="health-status-detail">— / —</span>
+                </div>
+                <div class="health-row">
+                  <span class="health-name">写作素材库索引</span>
+                  <span class="health-rate" id="health-wr-index">—</span>
+                  <span class="health-detail" id="health-wr-index-detail">—</span>
+                </div>
+                <span class="hint">滑动窗口最近 20 次，插件重启后清零。</span>
+              </div></div>
+            </div>
+
+            <div class="card">
+              <div class="card-head">
+                <h3>调试与维护</h3>
+              </div>
+              <div class="card-body"><div class="card-body-inner">
+                <div class="cfg-row">
+                  <div class="cfg-row-text">
+                    <div class="cfg-row-title">启用调试日志</div>
+                    <div class="cfg-row-desc">在控制台打印详细匹配详情与注入流程。非排错时建议关闭，日志量较大。</div>
+                  </div>
+                  <div class="cfg-row-control">
+                    <label class="switch"><input type="checkbox" id="c-debug-enabled"><span class="switch-track"></span></label>
+                  </div>
+                </div>
+                <div class="cfg-row">
+                  <div class="cfg-row-text">
+                    <div class="cfg-row-title">在回复末尾显示注入报告</div>
+                    <div class="cfg-row-desc">每轮回复末尾附一行本轮命中构成（世界书/记忆/素材/文档及文档来源），用于核对灵敏度、top_k 等参数的调整效果。会进入聊天记录，纯沉浸 RP 时可关闭；关闭后仍可用 /quill debug 查看上一轮构成。</div>
+                  </div>
+                  <div class="cfg-row-control">
+                    <label class="switch"><input type="checkbox" id="c-debug-report"><span class="switch-track"></span></label>
+                  </div>
+                </div>
+                <div class="cfg-field">
+                  <label class="cfg-field-label">全量备份</label>
+                  <div class="row-wrap">
+                    <button type="button" class="btn btn--filled" data-action="backup-export">
+                      <svg class="icon icon--sm" aria-hidden="true"><use href="#i-download"/></svg>一键备份下载
+                    </button>
+                    <label class="btn btn--gray file-btn">
+                      <svg class="icon icon--sm" aria-hidden="true"><use href="#i-upload"/></svg>恢复备份
+                      <input type="file" accept=".zip" data-file="backup-restore" aria-label="恢复备份">
+                    </label>
+                  </div>
+                  <span class="hint">打包或恢复素材库、世界书、角色卡、记忆与文档索引等全部插件数据（zip）。恢复后自动重载 RAG 组件。</span>
+                </div>
+              </div></div>
+            </div>
+          </div>
+
+          <div class="card card--attention" style="margin-top:var(--sp-4)">
+            <div class="card-head">
+              <h3>安全与权限控制</h3>
+            </div>
+            <div class="card-body"><div class="card-body-inner">
+              <div class="note note--warn">
+                <svg class="icon" aria-hidden="true"><use href="#i-warn"/></svg>
+                <span>建议配置：留空时，群聊中的写指令（切卡 / 清记忆 / 改流式等）将被拦截。私聊与 Web 面板编辑不受限制。</span>
+              </div>
+              <div class="cfg-field">
+                <label class="cfg-field-label" for="c-perm-admins">管理员白名单</label>
+                <textarea class="field field--wide" id="c-perm-admins" rows="4" placeholder="每行一个 QQ 号 / 用户 ID，也支持逗号或竖线分隔"></textarea>
+                <span class="hint">仅作用于群聊写指令的权限控制；Web 面板已由 AstrBot 自身鉴权保护。</span>
+              </div>
+            </div></div>
+          </div>
+        </section>
+
+        <div class="page-foot">
+          界面字体：使用各系统自带字体（macOS 的 SF Pro / 苹方、Windows 的微软雅黑 / Segoe UI、Linux 的 Noto Sans SC），不加载外部字体资源。
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div><!-- .layout -->
+
+<!-- ══ 悬浮操作条（仅在有未保存更改时出现） ══ -->
+<div class="actionbar" id="actionBar" role="status">
+  <span class="actionbar-text"><span class="dot dot--orange"></span>有未保存的更改</span>
+  <button type="button" class="btn btn--sm btn--plain-muted" data-action="config-discard">放弃</button>
+  <button type="button" class="btn btn--sm btn--filled" data-action="config-save">保存</button>
+</div>
+
+<!-- ══ 回到顶部 ══ -->
+<button type="button" class="to-top" id="toTop" data-action="to-top" title="回到顶部" aria-label="回到顶部">
+  <svg class="icon" aria-hidden="true"><use href="#i-chevron-up"/></svg>
+</button>
+
+<!-- ══ 提示横幅容器 ══ -->
+<div class="toaster" id="toaster" role="status" aria-live="polite"></div>
+
+<!-- ══ 通用模态框 ══ -->
+<div class="scrim" id="scrim" data-action="scrim-close">
+  <div class="modal" id="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-head">
+      <h2 id="modalTitle">编辑</h2>
+      <button type="button" class="icon-btn" data-action="modal-close" aria-label="关闭">
+        <svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>
+      </button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-foot">
+      <button type="button" class="btn btn--gray" data-action="modal-close">取消</button>
+      <button type="button" class="btn btn--filled" id="modalSaveBtn" data-action="modal-save">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ 文本粘贴导入 ══ -->
+<div class="scrim" id="textScrim" data-action="text-close">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="textModalTitle">
+    <div class="modal-head">
+      <h2 id="textModalTitle">文本粘贴导入</h2>
+      <button type="button" class="icon-btn" data-action="text-close" aria-label="关闭">
+        <svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <p class="row-desc" style="margin-bottom:var(--sp-3)">粘贴角色设定文本，支持 V2 JSON 与 W++ / Raw Text 标签格式。</p>
+      <textarea class="field field--wide mono fs-13" id="importText" rows="14" placeholder="Name = &quot;白芷&quot;&#10;Personality: 傲娇、外冷内热&#10;Scenario: 现代校园，同桌关系&#10;First Message: &quot;哼，你来干什么？&quot;……"></textarea>
+      <div class="row-wrap fs-12 t3" style="margin-top:var(--sp-3)">
+        <span>✓ V2 JSON</span><span>✓ W++ 标签</span><span>✓ 正则智能匹配</span>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn btn--gray" data-action="text-close">取消</button>
+      <button type="button" class="btn btn--filled" data-action="text-import">解析并导入</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ 确认 / 输入 对话框（替代原生 confirm/alert——沙箱内原生对话框被禁用） ══ -->
+<div class="scrim" id="alertScrim">
+  <div class="alert" role="alertdialog" aria-modal="true" aria-labelledby="alertTitle">
+    <div class="alert-title" id="alertTitle">提示</div>
+    <div class="alert-msg" id="alertMsg"></div>
+    <div class="alert-body" id="alertBody"></div>
+    <div class="alert-actions">
+      <button type="button" class="btn btn--gray" id="alertCancel" data-action="alert-cancel">取消</button>
+      <button type="button" class="btn btn--filled" id="alertOk">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ 头像裁剪 ══ -->
+<div class="scrim" id="cropScrim">
+  <div class="modal modal--sm" role="dialog" aria-modal="true" aria-labelledby="cropTitle">
+    <div class="modal-head">
+      <h2 id="cropTitle">裁剪头像</h2>
+      <button type="button" class="icon-btn" data-action="crop-close" aria-label="关闭">
+        <svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>
+      </button>
+    </div>
+    <div class="modal-body" style="text-align:center">
+      <div class="crop-stage" id="cropStage">
+        <img id="cropImg" alt="待裁剪的图片">
+        <div class="crop-mask"></div>
+      </div>
+      <div class="hint" style="margin-top:var(--sp-3)">拖拽移动 · 滚轮缩放 · 圆圈内为最终头像</div>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn btn--gray" data-action="crop-close">取消</button>
+      <button type="button" class="btn btn--gray" id="cropSkip" data-action="crop-skip">使用原图</button>
+      <button type="button" class="btn btn--filled" id="cropOk" data-action="crop-ok">确认裁剪</button>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

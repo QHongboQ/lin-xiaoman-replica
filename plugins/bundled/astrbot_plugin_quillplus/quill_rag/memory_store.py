@@ -1,0 +1,1090 @@
+# -*- coding: utf-8 -*-
+"""MemoryStore — SQLite BLOB + NumPy 余弦相似度。用于动态记忆（session 隔离）。"""
+
+from __future__ import annotations
+
+import sqlite3
+import aiosqlite
+
+import numpy as np
+from collections import OrderedDict
+import json
+
+try:
+    from .._fts_util import escape_trigram, escape_like, short_tokens
+    from ..quill.core.errors import StorageError
+    from ..quill.core.locks import ReentrantLock
+    from ..quill.core.storage_stats import note_storage_error
+except ImportError:  # 直接运行本文件时无父包
+    from _fts_util import escape_trigram, escape_like, short_tokens
+    from quill.core.errors import StorageError
+    from quill.core.locks import ReentrantLock
+    from quill.core.storage_stats import note_storage_error
+
+from astrbot.api import logger
+
+
+class MemoryStore:
+    """动态记忆存储：SQLite + BLOB 向量 + NumPy 余弦相似度。
+
+    不使用 FAISS，因为：
+    - 每个 session 的记忆条数有限（几十到几百条）
+    - 原生 FAISS 不支持强力的元数据 SQL 过滤
+    - SQLite BLOB + NumPy 逻辑简单 10 倍，且绝不会出 Bug
+    """
+
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self._conn = None
+        # M3.3 D5：可重入锁（同任务重入只加深度）。此前是不可重入的
+        # asyncio.Lock，持锁块内不得调用 _exec_* 只能靠注释纪律维系。
+        self._lock = ReentrantLock()
+        self._cache = OrderedDict()
+        self._MAX_CACHE = 50
+
+    # F4 修复：SQLite 共享连接（check_same_thread=False）必须由调用方串行化。
+    # 以下三个辅助方法统一在 self._lock 保护下执行 execute+commit/fetch。
+    async def initialize(self):
+        self._conn = await aiosqlite.connect(self.db_path, timeout=10.0)
+        await self._init_db()
+
+    async def _exec_write(self, sql: str, params=()) -> aiosqlite.Cursor:
+        """执行写操作并提交，返回 cursor（线程安全）"""
+        async with self._lock:
+            cur = await self._conn.execute(sql, params)
+            await self._conn.commit()
+            return cur
+
+    async def _exec_fetchall(self, sql: str, params=()) -> list:
+        """执行读操作并 fetchall，返回行列表（线程安全）"""
+        async with self._lock:
+            cur = await self._conn.execute(sql, params)
+            return await cur.fetchall()
+
+    async def _exec_fetchone(self, sql: str, params=()):
+        """执行读操作并 fetchone，返回单行或 None（线程安全）"""
+        async with self._lock:
+            cur = await self._conn.execute(sql, params)
+            return await cur.fetchone()
+
+    async def _init_db(self):
+        """初始化 SQLite 表（复用长连接）。"""
+        async with self._lock:
+            await self._conn.execute("PRAGMA journal_mode=WAL")
+            await self._conn.execute("PRAGMA busy_timeout=5000")
+            await self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS memories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    chat_summary TEXT DEFAULT '',
+                    vector BLOB NOT NULL,
+                    dim INTEGER NOT NULL,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id)")
+            await self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS chat_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+                    content TEXT NOT NULL,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_chatlogs_session ON chat_logs(session_id)")
+            await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_chatlogs_ts ON chat_logs(timestamp)")
+            
+            # ── FTS5 分词器迁移：unicode61 → trigram ──
+            # `CREATE ... IF NOT EXISTS` 不会改变已存在表的 tokenizer，老库必须
+            # 显式重建。unicode61 把整句连续中文当成一个 token，子串查询恒不命中
+            # （实测：整句入库后 MATCH '生日' 得 0 行），记忆检索的关键词通道
+            # 因此形同虚设，全靠向量通道兜底。
+            # 重建后由下方回填逻辑（COUNT==0 分支）重新灌数据。
+            try:
+                cur = await self._conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='memories_fts'"
+                )
+                row = await cur.fetchone()
+                if row and row[0] and "trigram" not in row[0].lower():
+                    logger.info("[Quill Memory] memories_fts 分词器升级为 trigram，重建索引")
+                    # 触发器跟着一起删：它们引用的是 memories_fts，
+                    # 重建表后需要重新创建（下方 CREATE TRIGGER IF NOT EXISTS 会补上）。
+                    for trg in ("memories_ai", "memories_ad", "memories_au"):
+                        await self._conn.execute(f"DROP TRIGGER IF EXISTS {trg}")
+                    await self._conn.execute("DROP TABLE IF EXISTS memories_fts")
+                    await self._conn.commit()
+            except Exception as e:
+                logger.warning("[Quill Memory] FTS 分词器迁移失败，沿用原表: %s", e, exc_info=True)
+
+            await self._conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(summary, content, tokenize='trigram');")
+            # Create triggers to sync FTS
+            await self._conn.execute('''
+            CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+              INSERT INTO memories_fts(rowid, summary, content) VALUES (new.id, new.summary, new.chat_summary);
+            END;
+            ''')
+            await self._conn.execute('''
+            CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+              DELETE FROM memories_fts WHERE rowid = old.id;
+            END;
+            ''')
+            await self._conn.execute('''
+            CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+              DELETE FROM memories_fts WHERE rowid = old.id;
+              INSERT INTO memories_fts(rowid, summary, content) VALUES (new.id, new.summary, new.chat_summary);
+            END;
+            ''')
+            await self._conn.commit()
+
+            # Backfill FTS5（直连 self._conn 的既有写法保持不变）
+            try:
+                cur = await self._conn.execute("SELECT COUNT(*) FROM memories_fts")
+                row = await cur.fetchone()
+                if row and row[0] == 0:
+                    await self._conn.execute("INSERT INTO memories_fts(rowid, summary, content) SELECT id, summary, chat_summary FROM memories")
+                    await self._conn.commit()
+            except Exception as e:
+                logger.warning("[Quill Memory] _init_db FTS5 回填失败: %s", e, exc_info=True)
+
+            # Schema 热迁移：新增记忆质量管理字段（兼容老数据库）
+            for stmt in (
+                "ALTER TABLE memories ADD COLUMN tags TEXT DEFAULT '[]'",
+                "ALTER TABLE memories ADD COLUMN strength INTEGER DEFAULT 10",
+                "ALTER TABLE memories ADD COLUMN useful_count INTEGER DEFAULT 0",
+                "ALTER TABLE memories ADD COLUMN useful_score REAL DEFAULT 0.0",
+                "ALTER TABLE memories ADD COLUMN is_active INTEGER DEFAULT 0",
+                "ALTER TABLE memories ADD COLUMN is_core INTEGER DEFAULT 0",
+            ):
+                try:
+                    await self._conn.execute(stmt)
+                except sqlite3.OperationalError as e:
+                    if "duplicate column" not in str(e).lower():
+                        raise
+            await self._conn.commit()
+
+    
+    async def _invalidate_cache(self, session_id: str):
+        if session_id in self._cache:
+            del self._cache[session_id]
+
+    async def update_core_memory(self, session_id: str, new_traits: str, crucial_facts: str):
+        await self._invalidate_cache(session_id)
+        # 审查修复：只更新"系统核心行"（vector 为空、由本方法/反思循环写入），
+        # 不碰用户通过 /memory pin 或面板钉住的普通记忆行（那些行带向量）。
+        # 此前无过滤 + rows[0]（最小 rowid）会把用户已 pin 的记忆静默覆盖。
+        rows = await self._exec_fetchall(
+            "SELECT id FROM memories WHERE session_id = ? AND is_core = 1 AND length(vector) = 0 "
+            "ORDER BY id LIMIT 1",
+            (session_id,)
+        )
+        core_content = json.dumps({"traits": new_traits, "facts": crucial_facts}, ensure_ascii=False)
+        if rows:
+            await self._exec_write("UPDATE memories SET summary = ?, timestamp = CURRENT_TIMESTAMP WHERE id = ?", (core_content, rows[0][0]))
+        else:
+            await self._exec_write("INSERT INTO memories (session_id, summary, vector, dim, is_core) VALUES (?, ?, ?, ?, ?)", (session_id, core_content, b'', 0, 1))
+
+
+    async def close(self):
+        """关闭数据库连接（插件卸载时调用）。"""
+        try:
+            if self._conn:
+                await self._conn.close()
+        except Exception as e:
+            logger.debug("[Quill Memory] close 失败: %s", e)
+
+    def _encode_vector(self, vector: list[float]) -> bytes:
+        """将向量列表编码为 BLOB。"""
+        if not vector:
+            raise ValueError("Cannot encode empty vector")
+        arr = np.array(vector, dtype=np.float32)
+        if not np.all(np.isfinite(arr)):
+            raise ValueError("Vector contains NaN or Inf")
+        return arr.tobytes()
+
+    def _decode_vector(self, blob: bytes, dim: int) -> np.ndarray:
+        """从 BLOB 解码向量。"""
+        expected = dim * 4  # float32 = 4 bytes
+        if len(blob) != expected:
+            raise ValueError(f"BLOB size {len(blob)} != expected {expected}")
+        return np.frombuffer(blob, dtype=np.float32).copy()
+
+    async def add(self, session_id: str, summary: str, vector: list[float], chat_summary: str = ""):
+        """添加一条记忆。
+
+        D4（M3.2）：底层失败抛 :class:`StorageError`（六类高频路径之一：add），
+        由调用方决定降级——此前 warning + 静默丢弃，/memory learn 的失败被
+        误报为「已学习」、后台摘要丢记忆完全不可见。
+        """
+        if not session_id or not summary or not vector:
+            return
+        dim = len(vector)
+        blob = self._encode_vector(vector)
+        try:
+            await self._exec_write(
+                "INSERT INTO memories (session_id, summary, chat_summary, vector, dim) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (session_id, summary, chat_summary, blob, dim)
+            )
+            await self._invalidate_cache(session_id)
+        except Exception as e:
+            note_storage_error("add", e)
+            raise StorageError(
+                "写入记忆失败",
+                detail=f"MemoryStore.add: {e}",
+                context={"session_id": session_id},
+            ) from e
+
+
+    async def _get_cached_vectors(self, session_id: str):
+        if session_id in self._cache:
+            self._cache.move_to_end(session_id)
+            return self._cache[session_id]
+        
+        # Load all active memories for session
+        rows = await self._exec_fetchall(
+            '''SELECT id, summary, chat_summary, vector, dim, timestamp,
+                      strength, useful_count, useful_score, is_active,
+                      is_core
+               FROM memories
+               WHERE session_id = ?
+                 AND (is_core = 1 OR is_active = 1 OR (julianday('now') - julianday(timestamp)) < 30)
+               ORDER BY timestamp DESC LIMIT 1000''',
+            (session_id,)
+        )
+        if not rows:
+            return None, None
+            
+        vectors = []
+        valid_rows = []
+        import numpy as np
+        for row in rows:
+            # 核心记忆行（update_core_memory 写入 vector=b''、dim=0）不携带向量，
+            # 跳过之：核心记忆经 get_core_memories 独立注入；且空向量与正常维度
+            # 向量 np.stack 会因形状不一致抛 ValueError，导致该会话检索整体失效。
+            if not row[3] or not row[4]:
+                continue
+            try:
+                vec = self._decode_vector(row[3], row[4])
+                vectors.append(vec)
+                valid_rows.append(row)
+            except Exception:
+                pass
+                
+        if not vectors:
+            return None, None
+
+        try:
+            matrix = np.stack(vectors)
+        except ValueError as e:
+            # P1-4: 维度不匹配时（如 Embedding 提供商切换后旧向量残留），跳过该会话
+            logger.warning("[Quill Memory] 向量维度不匹配，跳过会话 %s: %s", session_id, e)
+            return None, None
+        self._cache[session_id] = (valid_rows, matrix)
+        if len(self._cache) > getattr(self, '_MAX_CACHE', 50):
+            self._cache.popitem(last=False)
+            
+        return valid_rows, matrix
+
+    async def _fts_scores(self, session_id: str, query_text: str) -> dict:
+        """取本会话内 FTS 命中行的 BM25 分数 {rowid: score}。
+
+        两条路径，因为 trigram 分词器无法命中 <3 字的查询：
+          1. FTS 快路径 —— ≥3 字的片段走 MATCH，按 bm25 排序取前 50；
+          2. LIKE 兜底 —— 1-2 字的短词（「猫」「生日」，中文记忆检索里最高频的
+             形态）在 trigram 下结构上不可能命中，改用带 session 限定的 LIKE 扫描。
+
+        两种手段都**必须限定 session_id**：此前 MATCH 不带 session 过滤，
+        等于从全库任意取 50 条，本会话的命中可能被别的会话挤掉、甚至完全召不回。
+        """
+        scores: dict = {}
+
+        # ── 路径 1：FTS 快路径 ──
+        safe_query = escape_trigram(query_text)
+        if safe_query:
+            try:
+                # 注意：bm25() 只接受表名、不接受别名（bm25(f) 会报 no such column），
+                # 排序用 别名.rank 即可（bm25 与 rank 同源）。
+                rows = await self._exec_fetchall(
+                    "SELECT f.rowid, f.rank FROM memories_fts f "
+                    "JOIN memories m ON m.id = f.rowid "
+                    "WHERE memories_fts MATCH ? AND m.session_id = ? "
+                    "ORDER BY f.rank LIMIT 50",
+                    (safe_query, session_id),
+                )
+                for row in rows:
+                    # rank 为负值（越小越相关），取负号让「越大越相关」，
+                    # 与下方 LIKE 路径的分数量纲保持同一个方向。
+                    scores[row[0]] = -row[1]
+            except Exception as e:
+                logger.debug("[Quill Memory] _fts_scores FTS 检索失败，回落 LIKE: %s", e, exc_info=True)
+
+        # ── 路径 2：短词 LIKE 兜底 ──
+        # 即便 FTS 已有命中，短词仍可能带来额外结果（混合查询「生日的猫」），
+        # 因此两条路径是叠加关系而非互斥。
+        #
+        # 分数量纲说明：下游的 RRF 融合**只取名次、不取数值**，所以这里真正
+        # 决定的是「两种命中谁排前面」。此处让短词命中整体排在 BM25 命中之前，
+        # 并按词长加权（2 字比 1 字更具体）——理由是中文短查询里，用户输入被
+        # 原样子串命中是确定性信号，而 BM25 在长片段上属于相关性估计。
+        # BM25 命中并不会因此被排除：它们仍各自获得 fts 名次参与 RRF，
+        # 且向量通道独立为它们贡献名次。
+        shorts = short_tokens(query_text)
+        if shorts:
+            for tok in shorts[:5]:
+                try:
+                    rows = await self._exec_fetchall(
+                        "SELECT id FROM memories "
+                        "WHERE session_id = ? AND (summary LIKE ? ESCAPE '\\' OR chat_summary LIKE ? ESCAPE '\\') "
+                        "LIMIT 50",
+                        (session_id, f"%{escape_like(tok)}%", f"%{escape_like(tok)}%"),
+                    )
+                except Exception as e:
+                    logger.debug("[Quill Memory] _fts_scores LIKE 兜底检索失败: %s", e, exc_info=True)
+                    break
+                weight = 1000.0 + len(tok) * 10.0
+                for row in rows:
+                    scores[row[0]] = max(scores.get(row[0], 0.0), weight) + 1.0
+
+        return scores
+
+    async def search(self, session_id: str, query_vector: list[float], top_k: int = 3, query_text: str = "") -> list[dict]:
+        if not session_id or not query_vector:
+            return []
+            
+        # 1. FTS5 BM25 search
+        fts_scores = {}
+        if query_text:
+            fts_scores = await self._fts_scores(session_id, query_text)
+                
+        # 2. Vector Search (cached) —— 可能不可用（维度不匹配 / 无向量 / 空矩阵）。
+        #    此时**不能整体返回空**：FTS 已经算出了关键词命中，向量通道失败
+        #    不应把关键词结果一起丢掉。改为降级为「纯关键词检索」。
+        import numpy as np
+        vec_ok = True
+        try:
+            rows, matrix = await self._get_cached_vectors(session_id)
+        except Exception as e:
+            logger.warning(
+                "[Quill Memory] 向量矩阵构建失败，降级为纯关键词检索: %s", e, exc_info=True
+            )
+            rows, matrix, vec_ok = None, None, False
+
+        if vec_ok and not rows:
+            # 没有任何向量行 —— 但关键词可能仍命中（例如向量尚未生成完）。
+            # 同样走关键词降级，而不是直接放弃。
+            vec_ok = False
+
+        if vec_ok:
+            query = np.array(query_vector, dtype=np.float32)
+            # P1-4: 维度校验 — 查询向量维度与存储向量不匹配时降级（Embedding 切换后）
+            if query.shape[0] != matrix.shape[1]:
+                logger.warning(
+                    "[Quill Memory] 查询向量维度 %d 与存储向量 %d 不匹配，降级为纯关键词检索",
+                    query.shape[0], matrix.shape[1],
+                )
+                vec_ok = False
+            else:
+                query_norm_val = np.linalg.norm(query)
+                if query_norm_val < np.finfo(np.float32).eps:
+                    vec_ok = False
+                else:
+                    query_norm = query / query_norm_val
+                    matrix_norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+                    valid_mask = (matrix_norms.ravel() >= np.finfo(np.float32).eps)
+                    if not np.any(valid_mask):
+                        vec_ok = False
+
+        if not vec_ok:
+            # ── 关键词降级路径 ──
+            # 用 FTS 命中的 rowid 反查记忆行；没有命中就是真的没找到。
+            if not fts_scores:
+                return []
+            return await self._keyword_only_search(session_id, fts_scores, top_k)
+
+        matrix_normalized = matrix[valid_mask] / matrix_norms[valid_mask]
+        similarities = matrix_normalized @ query_norm
+        
+        results = []
+        idx = 0
+        for i, is_valid in enumerate(valid_mask):
+            if is_valid:
+                row = rows[i]
+                sim = float(similarities[idx])
+                idx += 1
+                
+                # Ebbinghaus decay: decay = exp(-lambda * days)
+                import datetime
+                try:
+                    ts = datetime.datetime.strptime(row[5], "%Y-%m-%d %H:%M:%S")
+                    # SQLite CURRENT_TIMESTAMP 为 naive UTC，统一按 naive UTC 比较
+                    now_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+                    age_days = (now_utc - ts).total_seconds() / 86400.0
+                except Exception:
+                    age_days = 0.0
+                decay = np.exp(-0.02 * age_days)
+                
+                # Frequency score
+                useful_count = row[7]
+                freq_boost = min(1.0, useful_count * 0.1)
+                
+                final_vec_score = sim * decay + freq_boost * 0.2
+                
+                row_id = row[0]
+                results.append({
+                    "id": row_id,
+                    "summary": row[1],
+                    "chat_summary": row[2],
+                    "timestamp": row[5],
+                    "strength": row[6],
+                    "useful_count": useful_count,
+                    "age_days": age_days,
+                    "is_core": row[10],
+                    # B11：vec_score 是「相似度 × 时间衰减 + 引用频次加成」的**排序分**，
+                    # 不是相似度本身。去重判定必须用原始余弦 sim，否则一条 cosine 0.80
+                    # 但被高频引用的旧记忆（0.80 + 0.12 = 0.92）会把真正的新记忆挤掉。
+                    "sim": sim,
+                    "vec_score": final_vec_score,
+                    "fts_score": fts_scores.get(row_id, 0.0)
+                })
+                
+        if not results:
+            return []
+            
+        # RRF (Reciprocal Rank Fusion)
+        results.sort(key=lambda x: x["vec_score"], reverse=True)
+        for rank, r in enumerate(results):
+            r["vec_rank"] = rank + 1
+            
+        results.sort(key=lambda x: x["fts_score"], reverse=True)
+        for rank, r in enumerate(results):
+            r["fts_rank"] = rank + 1 if r["fts_score"] > 0 else 1000
+            
+        k = 60
+        for r in results:
+            r["rrf_score"] = (1.0 / (k + r["vec_rank"])) + (1.0 / (k + r["fts_rank"]) if r["fts_rank"] < 1000 else 0)
+            
+        # Ignore core memories in top-k since they are injected automatically
+        non_core = [r for r in results if not r["is_core"]]
+        non_core.sort(key=lambda x: x["rrf_score"], reverse=True)
+        return non_core[:top_k]
+
+    async def _keyword_only_search(
+        self, session_id: str, fts_scores: dict, top_k: int
+    ) -> list[dict]:
+        """向量通道不可用时的纯关键词检索。
+
+        FTS 结果此前只在「向量成功」的分支里被消费，向量一旦失败（维度不匹配、
+        矩阵为空、embedding 出错）就整体返回 []，关键词命中随之丢失。
+        这里把它们独立取回，保证「至少还能按关键词召回」。
+        """
+        ids = [int(i) for i in fts_scores.keys()]
+        if not ids:
+            return []
+        results = []
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            try:
+                rows = await self._exec_fetchall(
+                    "SELECT id, summary, chat_summary, timestamp, strength, "
+                    "useful_count, is_core FROM memories "
+                    f"WHERE session_id = ? AND id IN ({placeholders})",
+                    (session_id, *chunk),
+                )
+            except Exception as e:
+                # D4（M3.2）：关键词回表失败不再伪装成「没找到」（六类高频路径之一：search）。
+                note_storage_error("search", e)
+                raise StorageError(
+                    "记忆关键词检索失败",
+                    detail=f"_keyword_only_search: {e}",
+                    context={"session_id": session_id},
+                ) from e
+            for r in rows:
+                results.append({
+                    "id": r[0],
+                    "summary": r[1],
+                    "chat_summary": r[2],
+                    "timestamp": r[3],
+                    "strength": r[4],
+                    "useful_count": r[5],
+                    "age_days": 0.0,
+                    "is_core": r[6],
+                    # 无向量分：仅关键词分参与排序（sim 同理为 0，去重判定不会误命中）
+                    "sim": 0.0,
+                    "vec_score": 0.0,
+                    "fts_score": fts_scores.get(r[0], 0.0),
+                    "degraded": True,
+                })
+        results.sort(key=lambda x: x["fts_score"], reverse=True)
+        # 核心记忆由 get_core_memories 无条件注入，不占 Top-K
+        non_core = [r for r in results if not r["is_core"]]
+        return non_core[:top_k]
+
+    async def mark_memories_used(self, memory_ids: list[int], score_add: float = 1.5):
+        """更新被召回记忆的有用性统计。"""
+        if not memory_ids:
+            return
+        try:
+            placeholders = ",".join("?" for _ in memory_ids)
+            # Find sessions to invalidate cache
+            rows = await self._exec_fetchall(f"SELECT DISTINCT session_id FROM memories WHERE id IN ({placeholders})", tuple(memory_ids))
+            for r in rows:
+                await self._invalidate_cache(r[0])
+            await self._exec_write(
+                f"""UPDATE memories
+                    SET useful_count = useful_count + 1,
+                        useful_score = useful_score + ?,
+                        strength = MIN(100, strength + 1),
+                        is_active = 1
+                    WHERE id IN ({placeholders})""",
+                [score_add] + memory_ids
+            )
+        except Exception as e:
+            logger.warning("[Quill Memory] mark_memories_used 失败: %s", e, exc_info=True)
+
+    async def prune_memories(self) -> int:
+        """分档遗忘清理任务（无情斩杀低价值记忆）。核心记忆(is_core=1)永不清理。
+
+        D4（M3.2）：失败抛 :class:`StorageError`（六类高频路径之一：prune），
+        调用方（启动初始化 / 反思调度 spawn）负责捕获降级——此前静默 return 0，
+        记忆表膨胀完全不可观测。
+        """
+        try:
+            # P3-2 修复：除原有 is_active=0 清理外，对 is_active=1 但超过 60 天
+            # 未更新的低价值记忆也执行降级清理，避免记忆表无限膨胀。
+            cursor = await self._exec_write("""
+                DELETE FROM memories
+                WHERE is_core = 0 AND (
+                    (is_active = 0 AND (
+                        (useful_score < 3 AND julianday('now') - julianday(timestamp) > 3)
+                        OR
+                        (useful_score >= 3 AND useful_score < 10 AND julianday('now') - julianday(timestamp) > 9)
+                    ))
+                    OR
+                    (is_active = 1 AND useful_score < 10
+                     AND julianday('now') - julianday(timestamp) > 60)
+                )
+            """)
+            deleted = cursor.rowcount
+            if deleted > 0:
+                # 被删除的记忆可能仍在会话向量缓存中（幽灵召回），直接清空
+                self._cache.clear()
+                logger.info(f"[Quill Memory] 记忆修剪: 清理了 {deleted} 条过期低价值记忆")
+            return deleted
+        except Exception as e:
+            note_storage_error("prune", e)
+            raise StorageError(
+                "记忆修剪失败",
+                detail=f"prune_memories: {e}",
+            ) from e
+
+    async def get_chat_logs_after(self, session_id: str, after_id: int, limit: int = 50) -> list[dict]:
+        """获取指定 session 中 after_id 之后的对话日志（增量读取）。"""
+        if not session_id:
+            return []
+        try:
+            rows = await self._exec_fetchall(
+                "SELECT id, role, content, timestamp FROM chat_logs "
+                "WHERE session_id = ? AND id > ? ORDER BY id ASC LIMIT ?",
+                (session_id, after_id, limit)
+            )
+            return [
+                {"id": r[0], "role": r[1], "content": r[2], "timestamp": r[3]}
+                for r in rows
+            ]
+        except Exception as e:
+            logger.warning("[Quill Memory] get_chat_logs_after 失败: %s", e, exc_info=True)
+            return []
+
+    async def list_memories(self, session_id: str, limit: int = 50) -> list[dict]:
+        """列出某 session 的所有记忆。"""
+        if not session_id:
+            return []
+        try:
+            rows = await self._exec_fetchall(
+                "SELECT id, summary, chat_summary, timestamp, strength, useful_count, useful_score, is_active, is_core FROM memories "
+                "WHERE session_id = ? ORDER BY timestamp DESC LIMIT ?",
+                (session_id, limit)
+            )
+            return [
+                {
+                    "id": r[0], "summary": r[1], "chat_summary": r[2], "timestamp": r[3],
+                    "strength": r[4], "useful_count": r[5], "useful_score": r[6], "is_active": r[7],
+                    "is_core": r[8]
+                }
+                for r in rows
+            ]
+        except Exception as e:
+            logger.warning("[Quill Memory] list_memories 失败: %s", e, exc_info=True)
+            return []
+
+    async def set_core(self, memory_id: int, is_core: bool) -> bool:
+        """设置/取消记忆的核心锚定状态。核心记忆不参与 Top-K 竞争，直接注入 prompt。"""
+        try:
+            # 缓存中的 is_core 标记需要同步失效，否则置锚后的记忆仍参与 Top-K 竞争
+            rows = await self._exec_fetchall("SELECT session_id FROM memories WHERE id = ?", (memory_id,))
+            if rows:
+                await self._invalidate_cache(rows[0][0])
+            cursor = await self._exec_write(
+                "UPDATE memories SET is_core = ? WHERE id = ?",
+                (1 if is_core else 0, memory_id)
+            )
+            return cursor.rowcount > 0
+        except Exception as e:
+            logger.warning("[Quill Memory] set_core 失败: %s", e, exc_info=True)
+            return False
+
+    async def get_core_memories(self, session_id: str) -> list[dict]:
+        """获取某 session 的所有核心记忆（is_core=1），无条件注入 prompt。"""
+        if not session_id:
+            return []
+        try:
+            rows = await self._exec_fetchall(
+                "SELECT id, summary FROM memories WHERE session_id = ? AND is_core = 1 ORDER BY timestamp DESC",
+                (session_id,)
+            )
+            return [{"id": r[0], "summary": r[1]} for r in rows]
+        except Exception as e:
+            logger.warning("[Quill Memory] get_core_memories 失败: %s", e, exc_info=True)
+            return []
+
+    async def delete_session_memories(self, session_id: str) -> int:
+        """删除某 session 的所有记忆（D4：失败抛 StorageError，类别 delete）。"""
+        if not session_id:
+            return 0
+        try:
+            cursor = await self._exec_write("DELETE FROM memories WHERE session_id = ?", (session_id,))
+            # 失效向量缓存，否则已删记忆仍会从缓存被召回
+            await self._invalidate_cache(session_id)
+            return cursor.rowcount
+        except Exception as e:
+            note_storage_error("delete", e)
+            raise StorageError(
+                "删除会话记忆失败",
+                detail=f"delete_session_memories: {e}",
+                context={"session_id": session_id},
+            ) from e
+
+    async def delete_all_session_memories(self, target_id: str) -> int:
+        """删除某 target_id 下所有 session 的记忆（含 target_id 本身和 target_id::* 所有 persona）。
+
+        用于 /quill reset 场景：用户可能切换过多个角色卡，每个 persona 有独立的
+        mem_session_id（target_id::persona_id）。此方法一次性清理全部。
+
+        D4（M3.2）：失败抛 :class:`StorageError`（六类高频路径之一：delete），
+        /quill reset 的既有 except 会将其转为用户可见的错误回执。
+        """
+        if not target_id:
+            return 0
+        try:
+            # LIKE 通配符转义（M3.3 自查）：target_id 含 %/_ 时，
+            # 未转义的 'target::%' 前缀匹配会误删其他会话的记忆。
+            cursor = await self._exec_write(
+                "DELETE FROM memories WHERE session_id = ? OR session_id LIKE ? ESCAPE '\\'",
+                (target_id, escape_like(target_id) + "::%"),
+            )
+            # 按 target_id 前缀失效所有 persona 维度的会话缓存
+            prefix = target_id + "::"
+            for key in [k for k in self._cache if k == target_id or k.startswith(prefix)]:
+                await self._invalidate_cache(key)
+            return cursor.rowcount
+        except Exception as e:
+            note_storage_error("delete", e)
+            raise StorageError(
+                "删除全部会话记忆失败",
+                detail=f"delete_all_session_memories: {e}",
+                context={"target_id": target_id},
+            ) from e
+
+    async def count_session_memories(self, session_id: str) -> int:
+        """统计某 session 的记忆总数（供分页显示真实 total）。"""
+        if not session_id:
+            return 0
+        try:
+            row = await self._exec_fetchone(
+                "SELECT COUNT(*) FROM memories WHERE session_id = ?", (session_id,)
+            )
+            return row[0] if row else 0
+        except Exception as e:
+            logger.warning("[Quill Memory] count_session_memories 失败: %s", e, exc_info=True)
+            return 0
+
+    async def get_recent_chat_logs(self, session_id: str, limit: int = 8) -> list[dict]:
+        """获取最近聊天记录（正序返回，供上下文恢复用）
+
+        返回值额外带 `id`。反思清理必须按**本次实际读到的 id 批次**删除，
+        不能凭「保留最新 N 条」重算——读与设计之间是 LLM/embedding 的等待窗口，
+        期间会话可能重新活跃并写入新日志，按重算删会把未参与本次摘要的日志
+        一起抹掉（见 main.py 反思循环）。
+        """
+        if not session_id:
+            return []
+        try:
+            rows = await self._exec_fetchall(
+                "SELECT id, role, content FROM chat_logs "
+                "WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                (session_id, limit)
+            )
+            result = [{"id": r[0], "role": r[1], "content": r[2]} for r in rows]
+            result.reverse()
+            return result
+        except Exception as e:
+            logger.warning("[Quill Memory] get_recent_chat_logs 失败: %s", e, exc_info=True)
+            return []
+
+    async def delete_chat_logs_by_ids(self, session_id: str, log_ids: list[int]) -> int:
+        """按**确定的 id 批次**删除日志，只删本次实际参与处理的那些。
+
+        与「保留最新 N 条、其余全删」的区别：后者会连带抹掉未进入本次摘要的
+        更早日志，以及摘要生成期间新写入的日志。返回实际删除行数。
+        """
+        ids = [int(i) for i in (log_ids or []) if i is not None]
+        if not ids or not session_id:
+            return 0
+        # SQLite 参数上限约 999，分批避免极端批次触发 "too many SQL variables"
+        deleted = 0
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            try:
+                cur = await self._exec_write(
+                    f"DELETE FROM chat_logs WHERE session_id = ? AND id IN ({placeholders})",
+                    (session_id, *chunk)
+                )
+            except Exception as e:
+                # D4（M3.2）：反思清理删除失败必须可见（写记忆成功、删日志失败
+                # 会导致下轮重复摘要），统一抛 StorageError（六类高频路径之一：delete）。
+                note_storage_error("delete", e)
+                raise StorageError(
+                    "删除对话日志批次失败",
+                    detail=f"delete_chat_logs_by_ids: {e}",
+                    context={"session_id": session_id},
+                ) from e
+            deleted += cur.rowcount if cur and cur.rowcount > 0 else 0
+        return deleted
+
+    async def log_message(self, session_id: str, role: str, content: str):
+        """记录一条原始对话（D4：底层失败抛 StorageError，类别 add；
+        聊天链路调用方 log_chat_message 保留「落日志失败不连累对话」的降级）。"""
+        if not session_id or not content or not content.strip():
+            return
+        if role not in ("user", "assistant"):
+            return
+        try:
+            await self._exec_write(
+                "INSERT INTO chat_logs (session_id, role, content) VALUES (?, ?, ?)",
+                (session_id, role, content[:2000])
+            )
+        except Exception as e:
+            note_storage_error("add", e)
+            raise StorageError(
+                "对话日志记录失败",
+                detail=f"log_message: {e}",
+                context={"session_id": session_id, "role": role},
+            ) from e
+
+    async def list_chat_logs(self, session_id: str, limit: int = 200) -> list[dict]:
+        """按 session 查询原始对话日志（取最近 limit 条，按时间正序返回）"""
+        if not session_id:
+            return []
+        try:
+            # 审查修复：ASC+LIMIT 取的是"最早 N 条"，与面板"最近 200 条"文案相反；
+            # 改为 DESC 取最近 N 条后 reverse 恢复时间正序展示。
+            rows = await self._exec_fetchall(
+                "SELECT id, role, content, timestamp FROM chat_logs "
+                "WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                (session_id, limit)
+            )
+            rows.reverse()
+            return [
+                {"id": r[0], "role": r[1], "content": r[2], "timestamp": r[3]}
+                for r in rows
+            ]
+        except Exception as e:
+            logger.warning("[Quill Memory] list_chat_logs 失败: %s", e, exc_info=True)
+            return []
+
+    #: 导出条数上限（B12）。导出要把整段文本拼进内存并一次性回给面板，
+    #: 此前无 LIMIT：一个长会话能拉出几十万行、每条最长 2000 字。
+    MAX_EXPORT_ROWS = 5000
+
+    async def export_chat_logs(self, session_id: str, format: str = "markdown") -> str:
+        """导出对话日志为文本格式。
+
+        B12：加条数上限；`ORDER BY timestamp, id` 让同秒内的多条记录也有稳定次序
+        （时间戳是秒级，只按它排序时同秒记录顺序不确定，导出结果会抖动）。
+        """
+        if not session_id:
+            return ""
+        try:
+            rows = await self._exec_fetchall(
+                "SELECT role, content, timestamp FROM chat_logs "
+                "WHERE session_id = ? ORDER BY timestamp ASC, id ASC LIMIT ?",
+                (session_id, self.MAX_EXPORT_ROWS + 1)
+            )
+        except Exception as e:
+            logger.warning("[Quill Memory] export_chat_logs 失败: %s", e, exc_info=True)
+            return ""
+
+        truncated = len(rows) > self.MAX_EXPORT_ROWS
+        if truncated:
+            rows = rows[: self.MAX_EXPORT_ROWS]
+
+        if format == "txt":
+            lines = [f"[{r[2]}] {r[0]}: {r[1]}" for r in rows]
+            body = "\n\n".join(lines)
+        else:
+            lines = [f"# 对话记录 — `{session_id}`\n"]
+            for r in rows:
+                role_label = "**用户**" if r[0] == "user" else "**AI**"
+                lines.append(f"{role_label}: {r[1]}\n")
+            body = "\n".join(lines)
+
+        if truncated:
+            body += (
+                f"\n\n> 已截断：单次导出上限 {self.MAX_EXPORT_ROWS} 条，"
+                f"更早的记录未包含在本文件中。"
+            )
+        return body
+
+    async def cleanup_chat_logs(self, retention_days: int) -> int:
+        """清理超过保留天数的对话日志（D4：失败抛 StorageError，类别 prune）。"""
+        if retention_days <= 0:
+            return 0
+        try:
+            cursor = await self._exec_write(
+                "DELETE FROM chat_logs WHERE timestamp < datetime('now', ?)",
+                (f"-{retention_days} days",)
+            )
+            return cursor.rowcount
+        except Exception as e:
+            note_storage_error("prune", e)
+            raise StorageError(
+                "对话日志清理失败",
+                detail=f"cleanup_chat_logs: {e}",
+            ) from e
+
+    async def delete_session_chat_logs(self, session_id: str) -> int:
+        """删除某 session 的所有对话日志（D4：失败抛 StorageError，类别 delete）。"""
+        if not session_id:
+            return 0
+        try:
+            cursor = await self._exec_write("DELETE FROM chat_logs WHERE session_id = ?", (session_id,))
+            return cursor.rowcount
+        except Exception as e:
+            note_storage_error("delete", e)
+            raise StorageError(
+                "删除会话对话日志失败",
+                detail=f"delete_session_chat_logs: {e}",
+                context={"session_id": session_id},
+            ) from e
+
+    async def delete_all_session_chat_logs(self, target_id: str) -> int:
+        """删除某 target_id 下所有 session 的对话日志（含 target_id 本身和 target_id::* 所有 persona）。
+
+        用于 /quill reset 场景：清理所有角色卡的对话日志，防止切换角色卡后
+        Context Restoration 垫入旧上下文。
+
+        D4（M3.2）：失败抛 :class:`StorageError`（六类高频路径之一：delete）。
+        """
+        if not target_id:
+            return 0
+        try:
+            # LIKE 通配符转义（M3.3 自查），理由同 delete_all_session_memories。
+            cursor = await self._exec_write(
+                "DELETE FROM chat_logs WHERE session_id = ? OR session_id LIKE ? ESCAPE '\\'",
+                (target_id, escape_like(target_id) + "::%"),
+            )
+            return cursor.rowcount
+        except Exception as e:
+            note_storage_error("delete", e)
+            raise StorageError(
+                "删除全部会话对话日志失败",
+                detail=f"delete_all_session_chat_logs: {e}",
+                context={"target_id": target_id},
+            ) from e
+
+    async def delete_memory(self, memory_id: int) -> bool:
+        """删除单条记忆（D4：底层失败抛 StorageError，类别 delete；
+        「没有这一行」仍是正常返回 False，不是存储失败）。"""
+        try:
+            rows = await self._exec_fetchall("SELECT session_id FROM memories WHERE id = ?", (memory_id,))
+            if rows:
+                await self._invalidate_cache(rows[0][0])
+        except Exception as e:
+            logger.warning("[Quill Memory] delete_memory 缓存失效查询失败: %s", e, exc_info=True)
+
+        try:
+            cursor = await self._exec_write("DELETE FROM memories WHERE id = ?", (memory_id,))
+            return cursor.rowcount > 0
+        except Exception as e:
+            note_storage_error("delete", e)
+            raise StorageError(
+                "删除记忆失败",
+                detail=f"delete_memory: {e}",
+                context={"memory_id": memory_id},
+            ) from e
+
+    async def get_stats(self) -> dict:
+        """返回存储统计。"""
+        try:
+            total = (await self._exec_fetchone("SELECT COUNT(*) FROM memories"))[0]
+            sessions = (await self._exec_fetchone(
+                "SELECT COUNT(DISTINCT session_id) FROM memories"
+            ))[0]
+            today = (await self._exec_fetchone(
+                "SELECT COUNT(*) FROM memories WHERE date(timestamp) = date('now')"
+            ))[0]
+        except Exception as e:
+            logger.warning("[Quill Memory] get_stats 失败: %s", e, exc_info=True)
+            return {"total_memories": 0, "total_sessions": 0, "today_count": 0}
+        return {"total_memories": total, "total_sessions": sessions, "today_count": today}
+
+    async def list_all_memories(self, limit: int = 200, offset: int = 0) -> list[dict]:
+        """列出全部记忆（跨 session），按创建时间倒序，支持分页。"""
+        try:
+            rows = await self._exec_fetchall(
+                "SELECT id, session_id, summary, chat_summary, timestamp, strength, useful_count, useful_score, is_active, is_core FROM memories "
+                "ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+                (limit, offset)
+            )
+            return [
+                {
+                    "id": r[0], "session_id": r[1], "summary": r[2], "chat_summary": r[3],
+                    "timestamp": r[4], "strength": r[5], "useful_count": r[6],
+                    "useful_score": r[7], "is_active": r[8], "is_core": r[9]
+                }
+                for r in rows
+            ]
+        except Exception as e:
+            logger.warning("[Quill Memory] list_all_memories 失败: %s", e, exc_info=True)
+            return []
+
+    async def list_sessions(self) -> list[dict]:
+        """P2-1: 列出所有有记忆的会话，按最近更新时间倒序。"""
+        try:
+            rows = await self._exec_fetchall(
+                "SELECT session_id, COUNT(*) as mem_count, MAX(timestamp) as last_active "
+                "FROM memories GROUP BY session_id ORDER BY last_active DESC"
+            )
+            return [
+                {"session_id": r[0], "mem_count": r[1], "last_active": r[2]}
+                for r in rows
+            ]
+        except Exception as e:
+            logger.warning("[Quill Memory] list_sessions 失败: %s", e, exc_info=True)
+            return []
+
+    async def count_all_memories(self) -> int:
+        """返回全部记忆总数（用于分页统计）。"""
+        try:
+            return (await self._exec_fetchone("SELECT COUNT(*) FROM memories"))[0]
+        except Exception as e:
+            logger.warning("[Quill Memory] count_all_memories 失败: %s", e, exc_info=True)
+            return 0
+
+    async def get_memory_by_id(self, memory_id: int) -> dict | None:
+        """获取单条记忆完整详情（含 chat_summary）。"""
+        try:
+            row = await self._exec_fetchone(
+                "SELECT id, session_id, summary, chat_summary, timestamp, "
+                "strength, useful_count, useful_score, is_active, is_core FROM memories WHERE id = ?",
+                (memory_id,)
+            )
+            if not row:
+                return None
+            return {
+                "id": row[0], "session_id": row[1], "summary": row[2],
+                "chat_summary": row[3], "timestamp": row[4],
+                "strength": row[5], "useful_count": row[6],
+                "useful_score": row[7], "is_active": row[8], "is_core": row[9]
+            }
+        except Exception as e:
+            logger.warning("[Quill Memory] get_memory_by_id 失败: %s", e, exc_info=True)
+            return None
+
+    async def search_all(self, query_vector: list[float], top_k: int = 5, session_ids: list[str] | None = None) -> list[dict]:
+        """跨 session 向量检索（全局搜索，不限制 session_id）。
+
+        P2-7 修复：新增可选 session_ids 白名单参数。传入时仅检索指定会话的记忆，
+        None 表示全量（保持向后兼容，仅限管理面板等受信任调用方使用）。
+        """
+        if not query_vector:
+            return []
+        try:
+            if session_ids:
+                placeholders = ",".join("?" for _ in session_ids)
+                rows = await self._exec_fetchall(
+                    f"SELECT id, session_id, summary, chat_summary, vector, dim, timestamp FROM memories "
+                    f"WHERE session_id IN ({placeholders}) "
+                    f"ORDER BY timestamp DESC LIMIT 2000",
+                    list(session_ids)
+                )
+            else:
+                rows = await self._exec_fetchall(
+                    "SELECT id, session_id, summary, chat_summary, vector, dim, timestamp FROM memories "
+                    "ORDER BY timestamp DESC LIMIT 2000"
+                )
+        except Exception as e:
+            # D4（M3.2）：面板向量检索失败上抛（六类高频路径之一：search），
+            # 不再伪装成「没有结果」。
+            note_storage_error("search", e)
+            raise StorageError(
+                "跨会话向量检索失败",
+                detail=f"search_all 查询: {e}",
+            ) from e
+
+        if not rows:
+            return []
+
+        try:
+            query = np.array(query_vector, dtype=np.float32)
+            query_norm_val = np.linalg.norm(query)
+            if query_norm_val < 1e-9:
+                return []
+            query_norm = query / query_norm_val
+
+            valid_rows = []
+            vectors = []
+            for row in rows:
+                try:
+                    vec = np.frombuffer(row[4], dtype=np.float32)
+                    if len(vec) != row[5]:
+                        continue
+                    norm = np.linalg.norm(vec)
+                    if norm < 1e-9:
+                        continue
+                    valid_rows.append(row)
+                    vectors.append(vec / norm)
+                except Exception:
+                    continue
+
+            if not vectors:
+                return []
+
+            matrix = np.stack(vectors)
+            similarities = matrix @ query_norm
+            if not np.all(np.isfinite(similarities)):
+                return []
+
+            top_indices = np.argsort(similarities)[::-1][:top_k]
+            results = []
+            for idx in top_indices:
+                row = valid_rows[idx]
+                results.append({
+                    "id": row[0],
+                    "session_id": row[1],
+                    "summary": row[2],
+                    "chat_summary": row[3],
+                    "timestamp": row[6],
+                    "score": float(similarities[idx]),
+                })
+            return results
+        except Exception as e:
+            note_storage_error("search", e)
+            raise StorageError(
+                "跨会话向量检索失败",
+                detail=f"search_all 计算: {e}",
+            ) from e

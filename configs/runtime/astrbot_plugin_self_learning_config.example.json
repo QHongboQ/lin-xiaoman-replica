@@ -1,0 +1,203 @@
+{
+  "Dependency_Install_Guide": {
+    "dependency_install_entry": "打开 WebUI Dashboard -> 全量设置 -> 手动安装依赖，选择“基础能力依赖”或“全能力依赖”。"
+  },
+  "Self_Learning_Basic": {
+    "enable_message_capture": true,
+    "enable_auto_learning": true,
+    "enable_realtime_learning": false,
+    "enable_jargon_learning": true,
+    "enable_style_learning": true,
+    "enable_realtime_llm_filter": false,
+    "enable_web_interface": true,
+    "enable_webui_password": null,
+    "webui_initial_password": "",
+    "web_interface_port": 7833,
+    "web_interface_host": ""
+  },
+  "Target_Settings": {
+    "target_qq_list": [],
+    "target_blacklist": [],
+    "backend_operator_whitelist": [],
+    "current_persona_name": "groupmate"
+  },
+  "Model_Configuration": {
+    "filter_provider_id": "",
+    "refine_provider_id": "",
+    "reinforce_provider_id": ""
+  },
+  "Learning_Parameters": {
+    "learning_interval_hours": 24,
+    "min_messages_for_learning": 200,
+    "max_messages_per_batch": 200,
+    "expression_learning_trigger_messages": 200,
+    "expression_learning_min_interval_seconds": 21600,
+    "topic_detection_interval_messages": 200,
+    "auto_review_enabled": true,
+    "auto_review_time": "03:30",
+    "nightly_orchestrated": true,
+    "auto_review_max_jargon": 100,
+    "auto_review_max_style": 20
+  },
+  "Filter_Parameters": {
+    "message_min_length": 5,
+    "message_max_length": 500,
+    "confidence_threshold": 0.7
+  },
+  "Style_Analysis": {
+    "style_analysis_batch_size": 100,
+    "style_update_threshold": 0.8
+  },
+  "Advanced_Settings": {
+    "debug_mode": false,
+    "log_level": "info",
+    "save_raw_messages": true,
+    "auto_backup_interval_days": 7,
+    "auto_apply_approved_persona": false
+  },
+  "Machine_Learning_Settings": {
+    "enable_ml_analysis": true,
+    "max_ml_sample_size": 100,
+    "ml_cache_timeout_hours": 1
+  },
+  "Persona_Backup_Settings": {
+    "auto_backup_enabled": true,
+    "backup_interval_hours": 24,
+    "max_backups_per_group": 10
+  },
+  "Goal_Driven_Chat_Settings": {
+    "enable_goal_driven_chat": false,
+    "goal_session_timeout_hours": 24,
+    "goal_auto_detect": true,
+    "goal_max_conversation_history": 40
+  },
+  "Affection_System_Settings": {
+    "enable_affection_system": true,
+    "max_total_affection": 0,
+    "max_user_affection": 100,
+    "affection_decay_rate": 0.95,
+    "affection_gain_multiplier": 0.5,
+    "affection_loss_multiplier": 0.5,
+    "enable_affection_time_decay": true,
+    "affection_decay_grace_hours": 48.0,
+    "affection_decay_interval_hours": 24.0,
+    "affection_decay_points_per_interval": 1,
+    "affection_decay_max_per_update": 3,
+    "daily_mood_change": true,
+    "mood_affect_affection": false,
+    "affection_batch_enabled": true,
+    "mood_batch_enabled": true,
+    "mood_batch_times": "08:00,13:00,20:00",
+    "mood_batch_timezone": "Asia/Shanghai",
+    "mood_batch_use_fat_fish_gate": true,
+    "mood_night_start_hour": 0,
+    "mood_night_end_hour": 6,
+    "mood_realtime_micro_adjust": false,
+    "affection_settlement_time": "03:30"
+  },
+  "Mood_System_Settings": {
+    "enable_daily_mood": true,
+    "enable_startup_random_mood": false,
+    "mood_change_hour": 6,
+    "mood_persistence_hours": 24
+  },
+  "Social_Context_Settings": {
+    "enable_social_context_injection": true,
+    "include_social_relations": false,
+    "include_affection_info": false,
+    "include_mood_info": false,
+    "expression_patterns_hours": 24,
+    "context_injection_position": "end"
+  },
+  "Storage_Settings": {
+    "data_dir": ""
+  },
+  "Database_Settings": {
+    "db_type": "sqlite",
+    "mysql_host": "",
+    "mysql_port": 3306,
+    "mysql_user": "root",
+    "mysql_password": "",
+    "mysql_database": "astrbot_self_learning",
+    "postgresql_host": "",
+    "postgresql_port": 5432,
+    "postgresql_user": "postgres",
+    "postgresql_password": "",
+    "postgresql_database": "astrbot_self_learning",
+    "postgresql_schema": "public",
+    "max_connections": 10,
+    "min_connections": 2
+  },
+  "API_Settings": {
+    "api_key": "",
+    "enable_api_auth": false
+  },
+  "Repository_Settings": {
+    "default_review_limit": 50,
+    "default_pattern_limit": 10,
+    "default_memory_limit": 50,
+    "default_affection_limit": 50,
+    "default_social_limit": 50,
+    "default_psychological_limit": 20,
+    "max_interaction_batch_size": 100,
+    "top_patterns_limit": 10,
+    "recent_interactions_limit": 20,
+    "trend_analysis_days": 7
+  },
+  "Integration_Settings": {
+    "delegate_memory_to_livingmemory": true,
+    "livingmemory_plugin_name": "astrbot_plugin_angel_memory",
+    "disable_local_memory_when_delegated": true,
+    "delegate_reply_to_group_chat_plus": false,
+    "group_chat_plus_plugin_name": "astrbot_plugin_angel_heart",
+    "disable_local_reply_when_delegated": true
+  },
+  "MaiBot_Enhancement": {
+    "enable_maibot_features": false,
+    "enable_expression_patterns": false,
+    "enable_expression_user_scope": false,
+    "enable_realtime_expression_learning": false,
+    "enable_memory_graph": false,
+    "enable_knowledge_graph": false,
+    "enable_time_decay": true
+  },
+  "Persona_Evolution_Settings": {
+    "persona_merge_strategy": "smart",
+    "max_mood_imitation_dialogs": 20,
+    "enable_persona_evolution": false,
+    "persona_compatibility_threshold": 0.6,
+    "use_persona_manager_updates": false,
+    "auto_apply_persona_updates": false,
+    "persona_update_backup_enabled": true
+  },
+  "Runtime_Internal_Settings": {
+    "llm_hook_injection_target": "extra_user_content_parts",
+    "enable_llm_hooks": false,
+    "use_sqlalchemy": true,
+    "enable_memory_cleanup": true,
+    "memory_cleanup_days": 30,
+    "memory_importance_threshold": 0.3,
+    "shutdown_step_timeout": 8,
+    "task_cancel_timeout": 3,
+    "service_stop_timeout": 5,
+    "llm_hook_context_timeout": 3.0,
+    "messages_db_path": "",
+    "learning_log_path": "",
+    "total_messages_collected": 97,
+    "enable_active_jargon_output": true,
+    "active_jargon_refresh_hours": 24,
+    "active_jargon_candidate_limit": 20,
+    "active_jargon_inject_limit": 1
+  },
+  "V2_Architecture_Settings": {
+    "embedding_provider_id": "",
+    "rerank_provider_id": "",
+    "rerank_top_k": 5,
+    "rerank_min_candidates": 3,
+    "provider_retry_interval_seconds": 10.0,
+    "enable_realtime_v2_processing": false,
+    "knowledge_engine": "legacy",
+    "lightrag_query_mode": "local",
+    "memory_engine": "legacy"
+  }
+}

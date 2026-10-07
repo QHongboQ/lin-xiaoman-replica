@@ -1,0 +1,37 @@
+services:
+  astrbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: lin-xiaoman-astrbot:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6185:6185"
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ./runtime-data:/AstrBot/data
+
+  snowluma:
+    image: motricseven7/snowluma@sha256:72d9d31597df0741e84747282e979642405d1afb6c2f83b53add601bafdb4a99
+    restart: unless-stopped
+    profiles: [qq-client]
+    ports:
+      - "127.0.0.1:6081:6081"
+      - "127.0.0.1:5099:5099"
+    environment:
+      SNOWLUMA_UID: ${SNOWLUMA_UID:-1000}
+      SNOWLUMA_GID: ${SNOWLUMA_GID:-1000}
+      VNC_PASSWD: "${VNC_PASSWD:?Set a private VNC_PASSWD in deployment/.env}"
+      SNOWLUMA_WEBUI_HOST: 0.0.0.0
+      SNOWLUMA_WEBUI_PORT: 6081
+      SNOWLUMA_ONEBOT_HOST: ${SNOWLUMA_ONEBOT_HOST:-astrbot}
+      SNOWLUMA_HOOK_AUTOLOAD: ${SNOWLUMA_HOOK_AUTOLOAD:-}
+      SNOWLUMA_QQ_FLAGS: ${SNOWLUMA_QQ_FLAGS:-}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ./snowluma-data:/app/data
+      - ./snowluma-config:/app/.config
+      - ./snowluma-share:/app/.local/share
+    depends_on:
+      - astrbot

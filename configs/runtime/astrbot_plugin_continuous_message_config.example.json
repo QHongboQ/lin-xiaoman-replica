@@ -1,0 +1,62 @@
+{
+  "basic": {
+    "enable": true,
+    "enable_group_debounce": true,
+    "group_debounce_ids": [],
+    "command_prefixes": [
+      "/"
+    ],
+    "merge_separator": "\n"
+  },
+  "access_control": {
+    "enable_id_white_list": false,
+    "id_whitelist": [],
+    "blacklist_mode": "disable",
+    "id_blacklist": []
+  },
+  "image_vision": {
+    "private_image_caption_provider_id": "",
+    "private_image_caption_prompt": ""
+  },
+  "debounce": {
+    "debounce_time": 2.2,
+    "enable_adaptive_debounce": true,
+    "adaptive_min_wait": 1.8,
+    "adaptive_max_wait": 4.2,
+    "adaptive_max_total_wait": 6.0,
+    "adaptive_short_message_threshold": 14
+  },
+  "message_features": {
+    "enable_recall_filter": true,
+    "enable_typing_detection": true,
+    "max_typing_wait": 60.0,
+    "enable_forward_analysis": true,
+    "forward_prefix": ""
+  },
+  "qq_card": {
+    "enable_qq_card_parsing": true,
+    "qq_card_disabled_platforms": [],
+    "qq_card_prompt": "[卡片链接]"
+  },
+  "image_handling": {
+    "enable_image_localization": false,
+    "image_localization_dir": "",
+    "image_localization_timeout": 10.0,
+    "image_localization_max_bytes": 20971520,
+    "image_localization_cleanup_max_age_hours": 24.0,
+    "image_localization_convert_gif_to_jpg": true,
+    "preserve_image_max_bytes": 20971520,
+    "preserve_images_total_max_bytes": 52428800
+  },
+  "link_parser": {
+    "enable_link_parsing": true,
+    "link_parser_disabled_platforms": [],
+    "link_parser_success_prompt": "[链接解析]",
+    "link_parser_failure_prompt": "[链接解析失败]",
+    "link_parser_merge_images": true,
+    "link_parser_max_links": 3,
+    "link_parser_timeout": 12.0,
+    "link_parser_max_text_length": 600,
+    "link_parser_proxy": ""
+  }
+}

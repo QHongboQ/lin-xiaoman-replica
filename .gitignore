@@ -4,12 +4,19 @@
 !.env.example
 data/
 runtime-data/
+deployment/snowluma-data/
+deployment/snowluma-config/
+deployment/snowluma-share/
+deployment/compose.yaml
+deployment/.env
 logs/
 attachments/
 plugin_data/
 *.db
 *.sqlite*
 *.log
+plugins/bundled/*/temp/
+plugins/bundled/*/*.mp3
 
 # Python artifacts
 __pycache__/

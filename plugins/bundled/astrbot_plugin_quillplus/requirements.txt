@@ -1,0 +1,9 @@
+# QuillPlus 核心依赖
+
+# V2 角色卡图片导入导出（PNG tEXt 块 + JPG EXIF）
+Pillow>=10.0.0
+
+# 向量检索 + 本地嵌入 + SQLite 异步
+faiss-cpu>=1.8.0
+numpy>=1.24.0
+aiosqlite>=0.19.0

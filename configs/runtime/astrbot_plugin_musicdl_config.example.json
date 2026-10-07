@@ -1,0 +1,10 @@
+{
+  "downloadToLocal": false,
+  "downloadDir": "data/downloads",
+  "cliPageSize": 10,
+  "downloadConcurrency": 3,
+  "sendMode": "record",
+  "forwardSongInfo": false,
+  "probeConcurrency": 3,
+  "cookies": {}
+}

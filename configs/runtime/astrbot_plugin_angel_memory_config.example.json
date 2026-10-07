@@ -1,0 +1,39 @@
+{
+  "provider_id": "",
+  "retrieval": {
+    "embedding_provider_id": "",
+    "rerank_provider_id": "",
+    "enable_local_embedding": true,
+    "embedding_batch_size": 50,
+    "embedding_timeout": 5,
+    "rerank_max_docs": 64,
+    "rerank_max_tokens_per_doc": null
+  },
+  "conversation_scope_map": "{}",
+  "memory_behavior": {
+    "default_passive_strength": 10,
+    "min_message_length": 5,
+    "short_term_memory_capacity": 1,
+    "decay_policy_override": {
+      "enabled": false,
+      "tier0_threshold": 3.0,
+      "tier1_threshold": 10.0,
+      "consolidate_speed": 2.5,
+      "forget_speed": 1.0,
+      "tier0_forget_speed": 1.0,
+      "cycle_tier0_days": 3
+    }
+  },
+  "enable_soul_system": {
+    "enabled": true,
+    "recall_depth_mid": 7,
+    "impression_depth_mid": 3,
+    "expression_desire_mid": 0.5,
+    "creativity_mid": 0.7
+  },
+  "note_assistant": {
+    "enable_recall": true,
+    "enable_create": true,
+    "top_k": 3
+  }
+}

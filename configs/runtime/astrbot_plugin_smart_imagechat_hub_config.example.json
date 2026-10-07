@@ -1,0 +1,122 @@
+{
+  "default_image_caption_provider_id": "",
+  "library_builder": {
+    "global_tags": [],
+    "image_files": [],
+    "empty_config_for_hint_only": "/#/plugin-page/astrbot_plugin_smart_imagechat_hub/image-center-page"
+  },
+  "caption_tag_category_settings": {
+    "enabled_presets": [
+      "图像类别",
+      "人物特征",
+      "情绪",
+      "动作",
+      "图片中的文本"
+    ],
+    "custom_categories": "表情包用途 语气"
+  },
+  "hidden_images": [],
+  "sync_on_startup": true,
+  "match_confidence_threshold": 0.8,
+  "user_search_flow": {
+    "enabled": true,
+    "request_keywords": [
+      "表情包",
+      "发图",
+      "来张图"
+    ]
+  },
+  "reply_after_search": {
+    "use_custom_reply": true,
+    "custom_reply": "",
+    "llm_reply_when_not_found": false,
+    "not_found_reply": "",
+    "empty_library_reply": ""
+  },
+  "proactive_emoji_reply": {
+    "enabled": true,
+    "analysis_provider_id": "",
+    "embedding_provider_id": "",
+    "retrieval_mode": "local_semantic",
+    "meme_only": true,
+    "embed_in_conversation": false,
+    "trigger_probability": "0.1",
+    "debug_mode": false
+  },
+  "auto_image_collection": {
+    "enabled": true,
+    "include_in_features": true,
+    "auto_reject_discarded": true,
+    "source_groups": [
+      "<YOUR_ID>",
+      "<YOUR_ID>"
+    ],
+    "ignored_sender_ids": [
+      "<YOUR_ID>"
+    ],
+    "non_meme_filter_strategy": "strict",
+    "filter_obvious_non_meme_images": false,
+    "max_file_size_kb": 1024,
+    "pending_pool_limit": 30,
+    "pending_ttl_days": 3,
+    "auto_accept": true,
+    "solidified_library_limit": 300,
+    "sampling_probability": "0.12",
+    "replace_lower_quality_when_full": true
+  },
+  "meme_combat": {
+    "enabled": false,
+    "follow_pattern": {
+      "enabled": false,
+      "time_window_seconds": 30,
+      "same_image_count": 3,
+      "distinct_users_required": true
+    },
+    "image_burst": {
+      "enabled": false,
+      "trigger_probability": "0.0",
+      "burst_count": 1
+    },
+    "battle": {
+      "enabled": false,
+      "time_window_seconds": 30,
+      "continuous_image_count": 6,
+      "analysis_provider_id": ""
+    }
+  },
+  "send_image_style": {
+    "enabled": true,
+    "meme_tag_only": true
+  },
+  "scheduled_backup": {
+    "enabled": true,
+    "backup_time": "03:50",
+    "backup_limit": 7
+  },
+  "model_fallback_options": {
+    "mode": "inherit",
+    "priority_1": "",
+    "priority_2": "",
+    "priority_3": "",
+    "provider_ids": []
+  },
+  "page_library_default_view_mode": "list",
+  "use_custom_reply": true,
+  "custom_reply": "找到一张比较合适的图。",
+  "llm_reply_when_not_found": false,
+  "not_found_reply": "图库里暂时没有找到特别合适的图片。",
+  "empty_library_reply": "图库里还没有可用图片，请先在插件配置里上传图片。",
+  "reply_config_migrated": true,
+  "image_tags": [],
+  "imagebed_import": {
+    "account_id": "",
+    "access_key_id": "",
+    "secret_access_key": "",
+    "bucket_name": "",
+    "endpoint_url": "",
+    "prefix": "",
+    "max_file_size_kb": 5120,
+    "scheduled_enabled": false,
+    "scheduled_time": "03:30"
+  }
+}

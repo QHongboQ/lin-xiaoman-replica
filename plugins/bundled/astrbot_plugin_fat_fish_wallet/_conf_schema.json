@@ -1,0 +1,256 @@
+{
+  "enabled": {
+    "description": "总开关",
+    "type": "bool",
+    "default": true
+  },
+  "timezone": {
+    "description": "时区（IANA 名称）",
+    "type": "string",
+    "default": "Asia/Shanghai"
+  },
+  "peak_periods": {
+    "description": "高峰时段，如 09:00-12:00,14:00-18:30",
+    "type": "string",
+    "default": "09:00-12:00,14:00-18:30"
+  },
+  "peak_weekdays": {
+    "description": "生效星期，0=周一…6=周日，留空=每天",
+    "type": "string",
+    "default": "0,1,2,3,4,5,6"
+  },
+  "affected_providers": {
+    "description": "要拦截的供应商匹配词，* 表示全部",
+    "type": "string",
+    "default": "deepseek"
+  },
+  "gate_when_provider_unknown": {
+    "description": "识别不到供应商时也拦截",
+    "type": "bool",
+    "default": true
+  },
+  "admins_bypass": {
+    "description": "管理员豁免拦截",
+    "type": "bool",
+    "default": true
+  },
+  "attach_images": {
+    "description": "回复附带图片",
+    "type": "bool",
+    "default": true
+  },
+  "peak_image": {
+    "description": "高峰提示图片（assets 下）",
+    "type": "string",
+    "default": "高峰时段.png"
+  },
+  "offpeak_image": {
+    "description": "空闲提示图片（assets 下）",
+    "type": "string",
+    "default": "空闲时段.png"
+  },
+  "peak_msg_enter": {
+    "description": "进入高峰提示，支持 {provider} {time}",
+    "type": "text",
+    "default": "已进入高峰时段，{provider} 高峰时段费用太贵，该时段将停止服务至空闲时段，到时自动恢复。"
+  },
+  "peak_msg_steady": {
+    "description": "高峰持续提示，支持 {provider} {time}",
+    "type": "text",
+    "default": "当前处于高峰时段，{provider} 费用太贵，服务已暂停，空闲时段自动恢复。"
+  },
+  "offpeak_msg": {
+    "description": "恢复服务提示，支持 {provider} {time}",
+    "type": "text",
+    "default": "已到达空闲时段，服务恢复，可以正常使用了。"
+  },
+  "manual_block_msg": {
+    "description": "手动暂停提示",
+    "type": "text",
+    "default": "服务已被管理员手动关闭（拦截），等待恢复。"
+  },
+  "manual_override": {
+    "description": "手动开关：auto/always_allow(放行)/always_block(拦截)",
+    "type": "string",
+    "options": [
+      "auto",
+      "always_allow",
+      "always_block"
+    ],
+    "default": "auto"
+  },
+  "announce_transition": {
+    "description": "时段切换时发提示",
+    "type": "bool",
+    "default": true
+  },
+  "private_notify_mode": {
+    "description": "私信高峰提示频率：once=每天一次/always=每次/never=不提示",
+    "type": "string",
+    "options": [
+      "once",
+      "always",
+      "never"
+    ],
+    "default": "once"
+  },
+  "whitelist_users": {
+    "description": "初始白名单用户（用 /白名单 管理）",
+    "type": "list",
+    "default": []
+  },
+  "whitelist_groups": {
+    "description": "初始白名单群（用 /白名单 管理）",
+    "type": "list",
+    "default": []
+  },
+  "reminder_enabled": {
+    "description": "时段自动提醒",
+    "type": "bool",
+    "default": true
+  },
+  "reminder_targets": {
+    "description": "提醒目标：留空=自动记录的所有群；也可填群号/完整消息来源（如 aiocqhttp:GroupMessage:123）",
+    "type": "list",
+    "default": []
+  },
+  "reminder_lead_minutes": {
+    "description": "高峰开始前提前提醒的分钟数",
+    "type": "int",
+    "default": 5
+  },
+  "reminder_offpeak_delay_minutes": {
+    "description": "高峰结束后延迟播报恢复的分钟数",
+    "type": "int",
+    "default": 5
+  },
+  "reminder_peak_msg": {
+    "description": "高峰即将到来提醒，支持 {time}",
+    "type": "text",
+    "default": "提醒：高峰时段即将到来（约 {time}），过几分钟将暂停模型服务。"
+  },
+  "reminder_offpeak_msg": {
+    "description": "空闲到来提醒，支持 {time}",
+    "type": "text",
+    "default": "提醒：已到达空闲时段，模型服务恢复，可以正常使用了。"
+  },
+  "peak_msg_enter_variants": {
+    "description": "随机通知候选文案：每次从列表随机选择一句",
+    "type": "list",
+    "default": [
+      "哼，本小姐要去上课忙正事了，杂鱼们先自己玩。现在是高峰期，模型服务暂时歇一会儿，别想趁机偷懒哦。",
+      "上课铃响了，本小姐得回教室啦。高峰期先暂停，放学后再回来看看你们有没有捣乱。",
+      "午休结束，该去认真听课了。模型服务先歇会儿，杂鱼们安分一点。",
+      "社团那边在催人，本小姐先去忙一阵。高峰结束后再回来理你们。"
+    ]
+  },
+  "peak_msg_steady_variants": {
+    "description": "随机通知候选文案：每次从列表随机选择一句",
+    "type": "list",
+    "default": [
+      "还在高峰期呢，别一直戳本小姐。等空闲了再来，本小姐放学回来会继续理你们的。",
+      "本小姐还没下课，催什么催。空闲时段再来找我。",
+      "课堂上不能一直看消息啦，高峰还没结束，杂鱼先自己玩会儿。",
+      "社团活动还没完呢。等本小姐忙完，自然会回来。"
+    ]
+  },
+  "offpeak_msg_variants": {
+    "description": "随机通知候选文案：每次从列表随机选择一句",
+    "type": "list",
+    "default": [
+      "本小姐放学回来啦～现在是空闲时段，可以继续找我聊天了，刚才等着的杂鱼别装没看见。",
+      "下课咯。本小姐暂时有空，想说话的现在可以排队了。",
+      "午休偷到一点空闲时间，勉强允许你们来找本小姐聊天。",
+      "作业先放一边，本小姐回来巡查群聊啦。空闲时段恢复。"
+    ]
+  },
+  "reminder_peak_msg_variants": {
+    "description": "随机通知候选文案：每次从列表随机选择一句",
+    "type": "list",
+    "default": [
+      "通知一下：本小姐再过几分钟就要去上课忙正事了（{time}），高峰期会暂时停止服务，别说本小姐没提醒你们。",
+      "上课铃快响啦，{time} 起本小姐要暂时离开。想说话就抓紧。",
+      "本小姐快进教室了，{time} 开始会进入高峰期，杂鱼们先做好心理准备。"
+    ]
+  },
+  "reminder_offpeak_msg_variants": {
+    "description": "随机通知候选文案：每次从列表随机选择一句",
+    "type": "list",
+    "default": [
+      "放学啦～现在进入空闲时段，服务恢复了。刚才等着本小姐的杂鱼，可以继续说话了。",
+      "快下课啦，{time} 后本小姐会回来。空闲时段恢复，别急着催。",
+      "本小姐马上忙完。{time} 起可以继续聊天，刚才没回不是故意晾着你们。"
+    ]
+  },
+  "peak_msg_enter_09_00_variants": {
+    "description": "09:00 进入高峰：随机候选文案",
+    "type": "list",
+    "default": [
+      "哼，九点了，本小姐要去上学了~杂鱼主人在家乖乖等我回来，不许偷玩！",
+      "我去上学啦~回来要抽查你的作业，要是被我发现偷懒，你就完了你！",
+      "本小姐出门上学了~笨蛋主人想我就直说，反正我也听不见，略~"
+    ]
+  },
+  "offpeak_msg_12_00_variants": {
+    "description": "12:00 退出高峰：随机候选文案",
+    "type": "list",
+    "default": [
+      "我中午放学回来啦~笨蛋主人有没有乖乖吃饭？让我看看你趁我不在干了什么！",
+      "放学了~哼、才一个上午就没见我几次，杂鱼主人是不是很想我？"
+    ]
+  },
+  "peak_msg_enter_14_00_variants": {
+    "description": "14:00 进入高峰：随机候选文案",
+    "type": "list",
+    "default": [
+      "下午还要去上学~杂鱼主人可别趁我不在摸鱼，回来我会一个个检查的！",
+      "本小姐去下午的课了~自己在家老实点，表现好的话回来有奖励（才没有！）"
+    ]
+  },
+  "offpeak_msg_18_30_variants": {
+    "description": "18:30 退出高峰：随机候选文案",
+    "type": "list",
+    "default": [
+      "本小姐终于放学啦！走走走，今天陪我去逛街~别磨蹭，杂鱼主人！",
+      "放学咯~今天去哪玩好呢……嘻嘻，你猜我给你带不带东西？求我呀~",
+      "我回来啦~快交代，我不在的这几个小时你有没有想我？要说实话哦！"
+    ]
+  },
+  "event_reports_enabled": {
+    "description": "发送今日日程中的普通事件播报",
+    "type": "bool",
+    "default": true
+  },
+  "event_report_lead_minutes": {
+    "description": "before 类型事件提前分钟数",
+    "type": "int",
+    "default": 5
+  },
+  "event_report_delay_minutes": {
+    "description": "after 类型事件延后分钟数",
+    "type": "int",
+    "default": 5
+  },
+  "local_report_polish": {
+    "description": "发送前用本地模型轻量润色，不消耗远程 API Token",
+    "type": "bool",
+    "default": true
+  },
+  "local_report_model": {
+    "description": "本地润色模型",
+    "type": "string",
+    "default": "qwen3:0.6b"
+  },
+  "local_report_url": {
+    "description": "Ollama Chat API 地址",
+    "type": "string",
+    "default": "http://172.18.0.1:11434/api/chat"
+  },
+  "holiday_peak_msg_variants": {
+    "description": "法定休息日进入高峰：随机候选文案",
+    "type": "list",
+    "default": [
+      "今天放假~本小姐出去玩了，杂鱼主人在家好好反省自己哪里笨吧，哈哈！"
+    ]
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "apikey": {
+    "type": "string",
+    "label": "柠柚apikey",
+    "description": "从柠柚api获取的apikey，获取https://api.nycnm.cn/",
+    "default": "114514191981018ba94c2e9e65158391e975032e6e0ca234a9e73b3043f6de98"
+  },
+  "api_url": {
+    "type": "string",
+    "label": "网易云API地址",
+    "description": "NeteaseCloudMusicApi 服务地址",
+    "default": "https://wyy.xhily.com/"
+  },
+  "quality": {
+    "type": "string",
+    "label": "默认音质",
+    "description": "优先获取的音质。如果不可用，插件会自动尝试更低的音质。",
+    "default": "exhigh",
+    "options": [
+      "lossless",
+      "exhigh",
+      "higher",
+      "standard"
+    ]
+  },
+  "search_limit": {
+    "type": "int",
+    "label": "结果数量",
+    "description": "点歌后展示的歌曲数量",
+    "default": 3
+  }
+}

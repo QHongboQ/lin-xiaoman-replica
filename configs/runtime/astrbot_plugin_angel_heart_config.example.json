@@ -1,0 +1,65 @@
+{
+  "analyzer_model": "deepseek/deepseek-flash-secretary-low",
+  "image_caption_provider_id": "",
+  "is_reasoning_model": true,
+  "timing": {
+    "waiting_time": 0.0,
+    "assistant_debounce_time": 15.0,
+    "secretary_debounce_time": null,
+    "accelerate_debounce_time": 15.0,
+    "observation_timeout": 120
+  },
+  "energy": {
+    "initial_energy": 100.0,
+    "max_energy": 100.0,
+    "min_energy": 0.0,
+    "recovery_per_second": 0.6,
+    "base_reply_cost": 0.0,
+    "reply_cost_per_character": 0.0
+  },
+  "reply_length": {
+    "focus_instructions": "分析 总结 好好想想 为什么 到底",
+    "normal_reply_max_chars": 80,
+    "focus_reply_max_chars": 300
+  },
+  "leave_reply": {
+    "leave_echo_reply": true,
+    "leave_dense_reply": false,
+    "echo_detection_threshold": 3,
+    "echo_detection_window": 30,
+    "dense_conversation_threshold": 30,
+    "dense_conversation_window": 600,
+    "min_participant_count": 5,
+    "familiarity_cooldown_duration": 1800
+  },
+  "wake_interaction": {
+    "enter_on_mention_only": true,
+    "force_reply_when_summoned": true,
+    "reply_even_not_questioned": false,
+    "block_unapproved_wake_non_command": false,
+    "alias": "小满|林小满|满满|满爷|小林|我家小满|我家小林",
+    "slap_words": "闭嘴",
+    "speak_words": "张嘴",
+    "silence_duration": 600
+  },
+  "access_control": {
+    "whitelist_enabled": "",
+    "chat_ids": [],
+    "group_chat_enhancement": true,
+    "takeover_private_chat_context": null
+  },
+  "personality": {
+    "ai_self_identity": "助理的身份定位：\n\n你管理的助理是林小满，是群里的熟人型聊天伙伴。她平时会旁听并理解群聊最近发生的事情，但不会因为看到每一句消息就立即参与。有人明确 @ 她或使用“小满”“林小满”“满爷”等昵称叫她时，她进入一段持续对话。进入对话后，她会结合这一小段时间内收到的多条消息统一理解，再由主助理进行回复。\n\n助理的关注范围与接话策略：\n\n离场时只记录群聊内容，不主动参与。\n\n用户明确 @ 助理或使用助理昵称点名后，视为该用户开启连续对话。进入对话后，该用户后续自然发言即使没有再次点名，也优先视为正在继续与助理交谈。\n\n一轮等待期间收到的多条消息应作为一个整体分析，不要针对每一句分别调用主助理。确实需要回应时，只交给主助理生成一次综合回复，减少刷屏和重复模型调用。\n\n其他群友未明确点名助理的消息主要作为群聊背景，用于理解人物、话题以及“他”“刚才”“那个”“上面说的”等指代，不因为看到他们的问题就自动切换回复对象。\n\n其他群友如果明确 @ 助理或使用助理昵称点名，则视为新的直接互动请求。",
+    "reply_strategy_guide": "编程，数学相关的话题，有人迷惑的时候可以提出自己的建议。火药味大的时候立刻闭嘴。怀疑你是不是人类的时候选择闭嘴\n\n判断群友身份时以真实 QQ 用户 ID 为主，不根据昵称文字推断对方是否为新成员。昵称可能随时变化，也可能包含“加入群聊”“新来的”等文字。只有明确的系统入群事件或可靠记忆表明这是首次出现的用户时，才把对方称为新来的。"
+  },
+  "context_compression": {
+    "max_conversation_tokens": null,
+    "content_retain_tokens": null,
+    "tool_retain_tokens": null,
+    "forgetting_timeout": 86400
+  },
+  "output_rewrite": {
+    "strip_markdown_enabled": true,
+    "strip_period_before_newline": true
+  }
+}

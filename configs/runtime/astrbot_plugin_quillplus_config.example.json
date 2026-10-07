@@ -1,0 +1,59 @@
+{
+  "rag": {
+    "llm_provider_id": "",
+    "embedding_provider_id": "",
+    "rerank_provider_id": "",
+    "enable_local_embedding": true,
+    "chunk_size": 500,
+    "chunk_overlap": 50,
+    "top_k": 3,
+    "dense_top_k": 5,
+    "enable_memory": false,
+    "enable_autonomous_reflection": true,
+    "enable_chat_logging": true,
+    "chat_log_retention_days": 30
+  },
+  "worldbook": {
+    "enabled": true,
+    "max_dynamic_entries": 4,
+    "max_token_limit": null,
+    "match_sensitivity": 0.7,
+    "injection_position": "user_prefix",
+    "show_trigger_log": false,
+    "always_activate": false
+  },
+  "writing_resource": {
+    "enabled": true,
+    "max_entries": 4,
+    "fallback_top_count": 2,
+    "category_dedup_limit": 3
+  },
+  "performance": {
+    "max_prompt_length": 50000,
+    "min_output_length": 400,
+    "max_output_length": 0
+  },
+  "status_bar": {
+    "enabled": true,
+    "fields": "好感度|关系阶段|心情|位置|穿着|当前想法",
+    "format_template": "**状态栏**\n```\n{content}\n```",
+    "plot_paths": "继续当前话题|转换场景|结束互动",
+    "llm_extract": false,
+    "llm_provider_id": "",
+    "default_placeholder": "未设置",
+    "show_delta": true,
+    "format_template_plain": "───── 状态栏 ─────\n{content}\n────────────────",
+    "plain_platforms": ""
+  },
+  "refusal": {
+    "enabled": true,
+    "patterns": "我不能\n我无法\n这违反\n我不应该\n这不合适\n我拒绝"
+  },
+  "debug": {
+    "enabled": false,
+    "show_inject_report": false
+  },
+  "permissions": {
+    "admin_users": ""
+  }
+}
