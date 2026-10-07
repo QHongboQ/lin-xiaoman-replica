@@ -24,7 +24,7 @@
 | 定时发送 | `astrbot_plugin_scheduled_sender` | v1.0.0 | 需单独安装 | [seelesyn](https://github.com/seelesyn/astrbot_plugin_scheduled_sender) |
 | 基础命令扩展 | `builtin_commands_extension` | v0.1.0 | 已随仓库分发 | 随运行环境安装的插件包 |
 | 成本控制 | `astrbot_plugin_cost_control` | 0.4.1 | 需单独安装；本地改动未分发 | [leafliber](https://github.com/leafliber/astrbot_plugin_cost_control) |
-| AstrBot 必备扩展 | `astrbot_plugin_essential` | v1.1.0 | 需单独安装 | [Soulter](https://github.com/Soulter/astrbot_plugin_essential) |
+| 娱乐与实用工具 | `astrbot_plugin_essential` | v1.1.0 | 需单独安装 | [Soulter](https://github.com/Soulter/astrbot_plugin_essential) |
 
 源码快照不含 Git 历史。每个第三方源码目录保留上游 LICENSE；各插件按自己的许可证使用。本项目根目录 MIT 许可证只适用于林小满个人接口及本项目自有文档，不覆盖 AGPL 插件或其他第三方内容。未随仓库分发的插件需单独安装；若市场不再提供锁定版本，请从上游核对兼容版本。
 

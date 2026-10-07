@@ -17,7 +17,7 @@
 - Life Scheduler：选择日程模型，设置地点锚点、工作周、时区、衣橱与人格外观锚点。
 - Airi Gallery：新建 `林小满` 分类并导入本仓库图片；设 `view_command_mode=prefix`，启用 LLM 工具（注册 `gallery_send`），并按需设置分类别名。脱敏配置模板见 [`configs/runtime/astrbot_plugin_airi_gallery_config.example.json`](../configs/runtime/astrbot_plugin_airi_gallery_config.example.json)。上传令牌及 Git 同步令牌只在管理面板填写。
 - Xiaoman Personal Interface：确认已启用。管理员测试命令受 AstrBot `ADMIN` 权限保护，测试放行只对开启它的当前会话生效。
-- TTS Router：按部署选择 TTS 引擎和音色；在明确的语音请求路径启用，不要求普通文字回复自动转语音。
+- TTS Router：按部署选择 TTS 引擎、凭据和音色；当前模板启用了若干语音输出策略及 LLM 工具，检查 `feature_policies` 中自动语音/概率语音的会话范围，避免意外对所有会话发语音。命令可用 `/tts_status`、`/tts_say`、`/tts_on`、`/tts_off`，具体权限以插件配置为准。
 - Fat Fish Wallet：填入时区、峰谷时段和日程播报目标。目标群/用户使用你自己的会话 ID。
 - Splitter：选择自然语义分段，设置每次回复气泡上限。
 - MusicDL：选择发送方式和下载目录；Cookie（如确实需要）留在本机。

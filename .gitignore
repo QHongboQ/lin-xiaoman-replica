@@ -26,6 +26,8 @@ __pycache__/
 
 # Local exports and editor files
 *.bak
+*.bak*
+*.before-*
 *.orig
 .DS_Store
 Thumbs.db
