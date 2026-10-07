@@ -1,6 +1,6 @@
 # 林小满｜完整自托管复刻包
 
-这不是只有角色卡或照片的示例，而是基于 **2026-10-06 WSL 实例**整理的 AstrBot 复刻项目：包含角色人格、21 个当前插件的版本清单、可分发的插件源码快照、20 份脱敏配置模板、37 张林小满图库图片、Docker 部署文件、安装脚本和全功能验收清单。
+这不是只有角色卡或照片的示例，而是基于 **2026-10-06 WSL 实例**整理的 AstrBot 复刻项目：包含角色人格、21 个当前插件的版本清单、可分发的插件源码快照、20 份脱敏配置模板、Airi 49 张图库图片（林小满 37 + 默认 12）、148 张筛查后的 Smart ImageChat 种子图、Docker 部署文件、安装脚本和全功能验收清单。
 
 目标是在另一台 Linux/WSL2 电脑上重建一套可运行、可继续积累记忆和关系的林小满。它不是原设备的逐字节克隆：账号密钥、聊天历史、记忆/好感度数据库、QQ 登录态、定时任务状态等私有运行数据不会公开，需要在新实例重新配置或从自己的加密备份迁移。
 
@@ -25,9 +25,10 @@
 | 插件源码 | [`plugins/`](plugins/) | 林小满个人照片接口和 15 个许可允许随包分发的插件源码快照 |
 | 插件版本锁定 | [`docs/plugin-lock.md`](docs/plugin-lock.md) | 当前 21 个插件的版本、上游、分发状态与本地改动说明 |
 | 运行配置模板 | [`configs/runtime/`](configs/runtime/) | 19 份脱敏插件 JSON + 1 份 AstrBot 命令配置模板 |
-| 角色图库 | [`gallery/xiaoman/`](gallery/xiaoman/) | 当前 Airi Gallery「林小满」分类的 37 张图片 |
+| 角色图库 | [`gallery/xiaoman/`](gallery/xiaoman/) 与 [`gallery/airi-default/`](gallery/airi-default/) | Airi Gallery「林小满」分类 37 张 +「默认」分类 12 张 |
 | 部署文件 | [`deployment/`](deployment/) | AstrBot Dockerfile、Compose 示例、环境变量模板和说明 |
 | 安装脚本 | [`scripts/install-runtime.sh`](scripts/install-runtime.sh) | 安装插件源码和缺失的脱敏配置；不覆盖已有文件 |
+| 素材清理工具 | [`scripts/sanitize-public-images.py`](scripts/sanitize-public-images.py) | 仅用于维护者整理已审核的图片目录：去元数据并重命名；不负责判定隐私、版权或内容安全 |
 | 创作素材 | [`creative-kit/`](creative-kit/) | 手动制作新图片时使用的视觉参考和提示材料 |
 
 图片、第三方源代码和本项目文档有不同许可边界；请先阅读各目录内的 `LICENSE` 及 [分发限制](#已知限制)。
@@ -48,7 +49,7 @@
 | 时间与日历 | TimeAwareness | 现实时间、上次聊天间隔、工作日/节气/日历、静态与人格日程 | [时间配置](configs/runtime/time_awareness_config.example.json) |
 | 峰谷闸门和成本 | 大肥鱼钱包 + Cost Control | 钱包可按时段暂停/恢复模型调用并播报；Cost Control 上游基线提供 token/费用预算、预警/停止/回退、缓存与模型用量报告，当前机上版本有未分发改动 | [钱包配置](configs/runtime/astrbot_plugin_fat_fish_wallet_config.example.json)、[成本配置](configs/runtime/astrbot_plugin_cost_control_config.example.json)、[机制边界](docs/mechanisms.md#8-安全审核成本与管理) |
 | 林小满角色照片 | Airi Gallery + 本仓库个人接口 | 模型可调用 `send_xiaoman_photo()`；Airi 还负责分类浏览、上传/删除、去重、重建索引和可选远程同步 | [Airi 配置](configs/runtime/astrbot_plugin_airi_gallery_config.example.json)、[接口说明](plugins/astrbot_plugin_xiaoman_personal_interface/README.md) |
-| 表情包与斗图 | Smart ImageChat Hub | 独立的表情图库、标签/语义检索、主动表情、斗图、自动采集和备份 | [表情配置](configs/runtime/astrbot_plugin_smart_imagechat_hub_config.example.json) |
+| 表情包与斗图 | Smart ImageChat Hub | 独立的表情图库、标签/语义检索、主动表情、斗图、自动采集和备份；仓库提供 148 张经过隐私/内容筛查的种子图 | [表情配置](configs/runtime/astrbot_plugin_smart_imagechat_hub_config.example.json)、[`gallery/smart-imagechat/`](gallery/smart-imagechat/) |
 | 外部插画与签到 | 画境拾珍 Get PX | 外部插画检索/过滤、签到卡、排行、主题等社区互动 | [Get PX 配置](configs/runtime/astrbot_plugin_get_px_config.example.json) |
 | 语音 | TTS Emotion Router | 情绪路由、按会话策略文字/语音/分段/概率输出和语音工具 | [TTS 配置](configs/runtime/astrbot_plugin_tts_emotion_router_config.example.json) |
 | 音乐 | MusicDL + Music Pro | 多源搜索、下载、换源和发送；与角色回复 TTS 是不同能力 | [MusicDL 配置](configs/runtime/astrbot_plugin_musicdl_config.example.json)、[Music Pro 配置](configs/runtime/astrbot_plugin_music_pro_config.example.json) |
@@ -108,7 +109,9 @@ docker compose --env-file deployment/.env -f deployment/compose.yaml up -d astrb
 
 ### 4. 安装未随仓库分发的插件并恢复图库
 
-通过 AstrBot 插件市场或作者上游安装：Airi Gallery、Splitter、Scheduled Sender、Cost Control、Essential。当前版本和作者地址见 [`plugin-lock.md`](docs/plugin-lock.md)。然后在 Airi 创建 `林小满` 分类并导入 [`gallery/xiaoman/`](gallery/xiaoman/) 中的 37 张图片；启用 LLM 工具并确认注册 `gallery_send`。图库同步/上传凭据只填在本机。
+通过 AstrBot 插件市场或作者上游安装：Airi Gallery、Splitter、Scheduled Sender、Cost Control、Essential。当前版本和作者地址见 [`plugin-lock.md`](docs/plugin-lock.md)。在 Airi 创建 `林小满` 分类并导入 [`gallery/xiaoman/`](gallery/xiaoman/) 中的 37 张图片；如需完整 Airi 图库，再将 [`gallery/airi-default/`](gallery/airi-default/) 的 12 张导入 `默认` 分类。启用 LLM 工具并确认注册 `gallery_send`。图库同步/上传凭据只填在本机。
+
+在 Smart ImageChat Hub 的 UI Page 中批量上传 [`gallery/smart-imagechat/`](gallery/smart-imagechat/) 的 148 张种子图，使用本机配置的图像说明模型重新生成标签；原机标签索引、自动采集待审图片和群聊数据不会随仓库迁移。图库管理操作见插件随包 README。
 
 ### 5. 按配置清单完成初始化
 
@@ -154,7 +157,7 @@ docker compose --env-file deployment/.env -f deployment/compose.yaml up -d astrb
 ## 备份、安全与隐私
 
 - [`configs/runtime/`](configs/runtime/) 是可公开分享的脱敏模板，不是原设备私有配置的镜像。
-- 已排除：模型/API 密钥、Airi Token、MusicDL Cookie、QQ/群号/管理员/白名单、Dashboard 凭据、数据库、聊天历史、好感度/学习状态、记忆/向量库、定时任务状态、运行日志和插件私有图库状态。
+- 已排除：模型/API 密钥、Airi Token、MusicDL Cookie、QQ/群号/管理员/白名单、Dashboard 凭据、数据库、聊天历史、好感度/学习状态、记忆/向量库、定时任务状态、运行日志、Smart ImageChat 私有标签/索引/采集待审池和插件缓存。仓库中的 148 张表情种子图与 49 张 Airi 图片是单独筛查过的公开素材，不是运行数据库导出。
 - `.gitignore` 排除 `deployment/runtime-data/`、数据库、日志和私有 `.env`。在 `git add` 前仍应自己检查 `git status` 和敏感文件。
 - 若需要迁移个人状态，请在原机停止服务或使用插件的安全备份功能，将整个 `AstrBot/data/` 加密备份到私有介质；不要把原始数据推到这个公开仓库。先在新实例验证恢复，不要覆盖另一台运行中的数据目录。
 - Self Learning/QuillPlus 等配置可能保存原始消息或聊天日志。部署者需自行设定留存、访问权限、加密和用户告知。
@@ -167,7 +170,7 @@ docker compose --env-file deployment/.env -f deployment/compose.yaml up -d astrb
 4. **模型输出不确定：** 人格、情绪、是否接话、是否发照片/语音、记忆工具调用都是受提示词与模型影响的行为；只能通过测试提升可靠性，不能承诺每次一致。
 5. **外部服务依赖：** 模型、QQ 适配器、Pixiv/Lolicon、TTS、音乐 API、图床、插件市场可能变化或失效；需使用者自行提供凭据并遵守平台/版权条款。
 6. **插件版本变化：** 当前配置模板按 2026-10-06 版本快照整理。新版本字段可能变化，先备份，再让插件生成新配置并手动合并。
-7. **运行时图库不等于公开素材许可：** 仓库包含当前 Airi「林小满」分类的 37 张照片；Smart ImageChat 等插件的自动采集图片、旧插件图库和缓存留在私有运行数据中。它们可能含用户提交内容或第三方作品，来源/授权未经逐项核验，因此不作为公共复刻素材包。
+7. **运行时数据库不等于公开素材包：** 仓库包含 Airi「林小满」37 张、「默认」12 张和筛查后的 Smart ImageChat 种子图 148 张。自动采集待审池、标签索引、缓存和已卸载插件遗留图库没有导出；部分遗留素材含不适合公开复刻的人像/性暗示内容。
 
 ## 故障排查
 

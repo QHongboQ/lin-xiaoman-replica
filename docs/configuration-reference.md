@@ -31,7 +31,7 @@
 | 羽笔 QuillPlus | [`astrbot_plugin_quillplus_config.example.json`](../configs/runtime/astrbot_plugin_quillplus_config.example.json) | RAG、本地向量检索、自主反思/聊天日志、世界书、写作素材、状态栏、拒绝规则、权限。决定是否保留聊天日志，配置向量模型和可见范围，并避免与其他记忆库重复。 |
 | Scheduled Sender | [`astrbot_plugin_scheduled_sender_config.example.json`](../configs/runtime/astrbot_plugin_scheduled_sender_config.example.json) | 时区、管理员限制、每会话任务数、最小间隔和错过任务宽限时间。支持一次性、每日、工作日、间隔和 Cron 计划及候选消息轮换；任务状态保存在私有 `plugin_data`，配置模板不包含原设备具体任务。新部署应重新建立并复核收件人。 |
 | Self Learning | [`astrbot_plugin_self_learning_config.example.json`](../configs/runtime/astrbot_plugin_self_learning_config.example.json) | 消息采集、自动学习、目标会话、模型、审核/过滤、风格与黑话、好感度、情绪、社交上下文、数据库、备份和记忆委托。填自己的 Provider/管理员范围；决定原始消息是否落盘与保留期限。 |
-| Smart ImageChat Hub | [`astrbot_plugin_smart_imagechat_hub_config.example.json`](../configs/runtime/astrbot_plugin_smart_imagechat_hub_config.example.json) | 图库标签/检索、主动表情、采集、斗图规则、发送样式、自动备份、外部图床导入。把表情图库与角色图库分开；审查自动采集与自动接受策略。 |
+| Smart ImageChat Hub | [`astrbot_plugin_smart_imagechat_hub_config.example.json`](../configs/runtime/astrbot_plugin_smart_imagechat_hub_config.example.json) | 图库标签/检索、主动表情、采集、斗图规则、发送样式、自动备份、外部图床导入。公开仓库额外附带 148 张筛查后的种子图（`gallery/smart-imagechat/`）；标签、索引、自动采集池及缓存仍是私有运行状态。把表情图库与角色图库分开；审查自动采集与自动接受策略。 |
 | Splitter | [`astrbot_plugin_splitter_config.example.json`](../configs/runtime/astrbot_plugin_splitter_config.example.json) | 简单/高级拆分、群聊拆分、分段策略、清理、媒体回复和发送延迟。按聊天平台调整每段字数和等待间隔。 |
 | TTS Emotion Router | [`astrbot_plugin_tts_emotion_router_config.example.json`](../configs/runtime/astrbot_plugin_tts_emotion_router_config.example.json) | TTS 引擎、服务商、情绪/音色映射、按会话策略的文字/语音/分段/概率输出、情绪标记。文件较大是因为包含情绪映射表；重新填 API Token/音色 ID 并审查哪些会话自动发语音。 |
 | TimeAwareness | [`time_awareness_config.example.json`](../configs/runtime/time_awareness_config.example.json) | 现实时间引导、上次聊天间隔、静态/AI 日程、日历、节假日/农历/节气。设置正确时区，并与 Life Scheduler 对齐，避免时间状态矛盾。 |
@@ -46,6 +46,6 @@
 
 ## 不在 JSON 模板中的状态
 
-以下不是“配置丢失”，而是有意不公开：AstrBot 数据库和 Provider/平台登录凭据，`plugin_data/` 中的对话记忆/好感度/学习结果、表情包图库与标签、Life Scheduler 今日状态、Scheduled Sender 任务状态、Airi 在线/同步凭据、下载缓存和日志。若要迁移自己的这些状态，请加密备份本机 `AstrBot/data/`，不要提交到公开 GitHub。参见 [`restore-and-backup.md`](restore-and-backup.md)。
+以下不是“配置丢失”，而是有意不公开：AstrBot 数据库和 Provider/平台登录凭据，`plugin_data/` 中的对话记忆/好感度/学习结果、Smart ImageChat 私有标签与检索索引、自动采集待审池、Life Scheduler 今日状态、Scheduled Sender 任务状态、Airi 在线/同步凭据、下载缓存和日志。公开种子图片是独立筛查导出，需重新导入并生成标签。若要迁移自己的私有状态，请加密备份本机 `AstrBot/data/`，不要提交到公开 GitHub。参见 [`restore-and-backup.md`](restore-and-backup.md)。
 
 当前 WSL `config/` 目录还留有 Living Memory、Local Reminiscence、Meme Manager、Stealer 等历史配置文件，但对应插件目录不在当前安装列表中；另有一个旧 `meme_manager` 配置文件。它们按残留/未启用配置处理，不算当前林小满机制，也未复制到公开模板。重新安装这些插件前，应先单独确认用途、数据来源和权限。

@@ -3,7 +3,7 @@
 ## 这份公开仓库恢复什么
 
 - 林小满角色卡、机制说明、当前插件配置模板和插件源码快照。
-- 当前 Airi Gallery `林小满` 分类的 37 张图片。
+- 当前 Airi Gallery `林小满` 分类的 37 张图片、`默认`分类的 12 张图片，以及 148 张经筛查的 Smart ImageChat 种子图。
 - Docker AstrBot 部署文件和安装脚本。
 
 新实例不会带入原来的 QQ 登录、模型服务密钥、对话记录、用户记忆、好感度/学习数据库、日程运行状态、表情包采集库或日志。它们留在原设备的 AstrBot `data/` 中；本仓库用于创建干净实例，再按自己的账号重新配置。
@@ -14,8 +14,9 @@
 2. 启动 AstrBot 一次，完成管理面板初始化，然后停止容器。
 3. 运行 `bash scripts/install-runtime.sh deployment/runtime-data`。安装脚本会复制本仓库内的插件源码快照与脱敏配置，并保留目标目录已有文件。
 4. 启动 AstrBot，安装插件锁定表中需单独安装的插件，重新配置 QQ 平台、模型提供方和管理员/白名单。
-5. 在 Airi Gallery 创建 `林小满` 分类并导入 `gallery/xiaoman/` 中的 37 张图片。
-6. 按 `docs/settings.md` 检查插件配置，并运行 `README.md` 中的验收清单。
+5. 在 Airi Gallery 创建 `林小满` 分类并导入 `gallery/xiaoman/` 中的 37 张图片；如需完整图库，再将 `gallery/airi-default/` 中的 12 张导入 `默认` 分类。
+6. 在 Smart ImageChat Hub 的 UI Page 批量上传 `gallery/smart-imagechat/` 中的 148 张种子图，使用新实例的图像说明模型生成标签。不要覆盖插件数据库或导入原始自动采集待审池。
+7. 按 `docs/settings.md` 检查插件配置，并运行 `README.md` 中的验收清单。
 
 ## 原设备的数据备份
 
