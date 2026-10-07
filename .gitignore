@@ -1,0 +1,24 @@
+# AstrBot runtime data and local secrets
+.env
+.env.*
+!.env.example
+data/
+runtime-data/
+logs/
+attachments/
+plugin_data/
+*.db
+*.sqlite*
+*.log
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Local exports and editor files
+*.bak
+*.orig
+.DS_Store
+Thumbs.db

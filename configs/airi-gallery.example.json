@@ -1,0 +1,21 @@
+{
+  "view_command_mode": "prefix",
+  "view_multiple_mode": "single",
+  "view_multiple_max": 5,
+  "llm_tool_enabled": true,
+  "category_aliases": [
+    "自拍=林小满",
+    "小满=林小满",
+    "满满=林小满"
+  ],
+  "use_permission": true,
+  "admins": [],
+  "whitelist": [],
+  "upload_token": "",
+  "git_sync_enabled": false,
+  "git_platform": "github",
+  "git_repo_owner": "",
+  "git_repo_name": "",
+  "git_branch": "main",
+  "git_token": ""
+}

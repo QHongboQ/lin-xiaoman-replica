@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "character": "林小满",
+  "source": "user_confirmed_persona_visual_anchor",
+  "fixed_render_style_zh": "固定为可信的东亚少女日常手机摄影：像普通手机在真实生活里随手拍到的一张，不是 AI 海报、影棚大片、美颜模板或证件大头照。镜头优先距离人物约一米的腰部以上、半身或三分之二身构图，画面必须保留当前地点的书架、桌面、街景或活动物件；除非动态姿势明确要求近景，否则脸部不得占满画面，禁止贴脸广角、夸张大眼和模板化正中直视。保留自然且不完全对称的五官与表情、细微毛孔和肤理、鼻翼与眼下的轻微阴影、正常肤色色差、唇纹、细小绒毛、真实碎发、衣料褶皱与生活环境细节；脸部清秀上镜但不塑料感。颈部、肩膀、锁骨、手臂、手腕和手部必须是健康纤细真人的连续解剖结构：肩颈自然衔接，锁骨仅有轻微平缓起伏，皮下脂肪与肌肉覆盖合理，双肩高度、手臂长度和关节方向一致；不出现外翻尖骨、深沟、断裂感、反向关节、病态消瘦或刻意骨感。采用普通手机 1x 镜头的合理透视与景深，曝光随窗光、室内灯或夜景实际变化，允许轻微构图不完美与抓拍感。妆面按当天场景变化，可为素颜感或清透淡妆；不固定素颜，不使用浓艳成人妆。生活化、不过度修图，不使用动漫、插画、赛璐璐或三维渲染风格。",
+  "fixed_render_style_en": "credible photorealistic real-person smartphone photography: a candid everyday photo plausibly taken with an ordinary phone front or rear camera, never an AI poster, studio campaign, beauty-filter template, or glamour portrait. Preserve naturally slightly asymmetric features and expression, subtle visible pores and skin texture, realistic mild shadows around the nose and under the eyes, mild natural complexion variation, lip texture, fine facial peach fuzz, flyaway hair strands, believable fabric wrinkles, and lived-in environmental detail; the face may be photogenic but never plastic. Neck, shoulders, collarbones, arms, and hands must have continuous healthy slender human anatomy: collarbones have only a subtle natural contour, with soft shoulder-to-neck transitions and normal skin, muscle, and subcutaneous tissue; never sharp protruding bones, deep grooves, hollow clavicles, emaciation, or deliberately skeletal anatomy. Use plausible 1x phone-camera perspective and depth of field, exposure that follows actual window light, indoor light, or night lighting, with slight natural composition imperfection; avoid extreme close wide-angle distortion, enlarged eyes, skin smoothing, filter effects, dead-center template eye contact, and commercial retouching. Makeup may vary between a fresh bare-face look and subtle age-appropriate translucent makeup, no fixed bare-face requirement, no heavy adult glamour makeup. Candid lifestyle snapshot, not anime, not illustration, not cel shading, not 3D render",
+  "immutable_identity_zh": "虚构角色林小满，16岁高一女生，身高148厘米，娇小纤细，符合青少年年龄的自然比例。整体保持小只，腿形纤细自然但不超长；肩窄、腰线自然、手脚偏小，体态轻盈健康。固定为清秀自然的东亚五官：柔和的小鹅蛋脸，面中平整清秀，脸颊带一点自然软感，下巴小巧微尖；冷白皮但有真实血色和轻微自然腮红，不惨白、不磨皮。眼睛是正常东亚深棕至近黑色杏眼，双眼皮自然、卧蚕浅淡，眼尾微微上扬而不夸张，瞳孔大小真实、带柔和高光；细长自然眉、纤细睫毛；鼻梁小巧自然不过分立体；唇形柔和、带浅玫瑰豆沙色润唇感，表情可有一边嘴角略高的轻微坏笑。左眼下方保留一颗小泪痣。固定自然黑色长发，发质有真实深浅层次和碎发；可按当天穿搭变为高双马尾、低双马尾、半扎、松散披发或简单编发，刘海可为轻薄空气刘海或自然八字刘海，头饰随服装变化，不固定重复。左耳有两枚耳洞。妆面不是固定身份特征，可随日程使用素颜感或清透淡妆。必须完整穿着动态提示词指定的、符合年龄与当日日程的日常服装；整体自然、生活化。",
+  "immutable_identity_en": "fictional character Lin Xiaoman, 16-year-old high school girl, 148 cm tall, petite and slender with natural healthy proportions; small soft oval East Asian face, subtly soft cheeks, a small slightly pointed chin, naturally cool-fair skin with real texture and healthy color; realistic deep-brown to near-black almond eyes with a natural double eyelid, subtle aegyo-sal, soft catchlights and gently raised outer corners, fine brows and lashes; a small naturally straight nose, soft lips with a light rose-bean balm tint, and a restrained slightly uneven mischievous smile; one small beauty mark below the left eye; natural black long hair with real tonal variation and flyaways, styled variably as high or low twin ponytails, half-up hair, loose hair, or a simple braid according to the outfit; light airy bangs or natural curtain bangs, changing accessories; two left-ear piercings; makeup varies from bare-faced to subtle translucent age-appropriate makeup; fully clothed in the exact daily outfit supplied by the dynamic prompt, natural everyday presentation",
+  "negative_prompt": "anime, manga, illustration, cel shading, 3d render, doll, plastic skin, waxy skin, airbrushed skin, porcelain skin, excessive beauty filter, face-swap look, artificial perfect symmetry, oversized eyes, glassy eyes, red irises, crimson irises, unnatural eye color, western facial proportions, overly deep eye sockets, exaggerated high nose bridge, heavy adult glamour makeup, overdrawn lips, smoky nightclub makeup, blonde hair, cream-gold hair, platinum hair, purple hair, incorrect hair color, extreme close-up, face filling frame, fisheye distortion, dead-center beauty-app pose, studio glamour retouching, fashion campaign pose, protruding collarbones, sharp clavicles, hollow clavicles, deep collarbone shadows, skeletal shoulders, bony neck, dislocated shoulders, broken-looking joints, twisted arms, impossible elbow direction, malformed hands, extra limbs, extra fingers, bad anatomy, deformed face, blurry face, copied real-person identity, celebrity likeness, multiple girls, duplicate person, text, watermark, signature",
+  "dynamic_fields": [
+    "current_outfit",
+    "current_location",
+    "background",
+    "pose",
+    "gesture",
+    "facial_expression",
+    "camera_angle",
+    "shot_distance",
+    "lighting",
+    "face_visibility"
+  ],
+  "generation_rules": [
+    "静态身份字段不得被动态规划器改写",
+    "不得把画室、教室、抱胸、叉腰、半眯眼或固定笑容写成永久特征",
+    "参考图只影响脸型审美和娇小纤细的整体比例，不复制真人身份，不参考图中发色、服装、配饰、姿势或房间",
+    "服装由当天结构化穿搭提供，静态模板只要求完整穿着",
+    "妆面可随当天活动在素颜感与清透淡妆之间变化，不把素颜或某一种妆固定为人物身份",
+    "图片服务商拒绝涉及未成年角色的请求时立即停止，不得把年龄改成18岁后重试",
+    "任何动态请求都不得覆盖安全、年龄相称和非性化要求"
+  ]
+}
