@@ -41,12 +41,38 @@
 
 逐项恢复、数据备份边界和更新操作见 [`docs/restore-and-backup.md`](docs/restore-and-backup.md)。
 
-## 照片行为
+## 林小满的机制一览
+
+林小满不是只有一张人格卡或一个发图工具，而是由 AstrBot、角色设定、多个插件和本机运行数据一起构成。详细机制、各能力边界和复刻验收项目见 [`docs/mechanisms.md`](docs/mechanisms.md)。
+
+| 机制 | 负责组件 | 当前配置下的作用 |
+|---|---|---|
+| 人格与说话边界 | [`docs/persona.md`](docs/persona.md) + 主模型 | 嘴硬、熟人调侃、严肃问题收敛；限制隐私泄露、人身攻击和越界亲密内容。模型生成不是硬编码保证。 |
+| 群聊在场与唤醒 | 天使之心 | 被提及/明确召唤后进入群聊，评估是否接话并整理输出；不承诺每条消息必答。 |
+| 连续消息理解 | 消息防抖 + Splitter | 合并短时间连续输入，处理引用、媒体、链接；长回复按语义分段发送。 |
+| 关系、记忆、学习 | 天使之魂 + Self Learning + 羽笔 | 用户记忆、笔记/检索、好感度与情绪变化、风格/群黑话学习、世界书/RAG。数据写入本地，复刻后重新积累。 |
+| 时间与生活状态 | Life Scheduler + TimeAwareness | 生成每日活动/穿搭，注入当前时段、节假日、日历和上次聊天间隔；需要检查时区和重叠日程。 |
+| 角色照片 | Airi Gallery + 林小满个人接口 | 模型决定调用时，从“林小满”分类委托发送 1 张；不与表情包或外部插画混用。 |
+| 表情包与斗图 | Smart ImageChat Hub | 语义搜索、主动表情、自动采集和图库备份；需单独审核采集内容。 |
+| 外部插画/签到 | 画境拾珍（Get PX） | 外部插画检索和签到排行，不是角色照片库。 |
+| 语音和音乐 | TTS Router、MusicDL、Music Pro | TTS 情绪路由/按策略发语音；点歌下载与语音合成是两条独立链路。 |
+| 安全与成本 | 阿瓦隆、大肥鱼钱包、Cost Control | 输入/输出审核、关键词与重复消息拦截；峰谷时段调用闸门及成本管理。 |
+| 定时及管理 | Scheduled Sender、AstrBot 命令扩展 | 定时任务向指定会话发送、会话/插件/模型管理；目标和权限必须在新实例重新设置。 |
+
+照片机制补充：
 
 - 自然对话由主模型根据人格和上下文判断是否调用 `send_xiaoman_photo()`；用户提到“照片”不等于必须发图。
 - 个人接口只委托 Airi Gallery 的 `gallery_send`，目标固定为 `林小满` 分类、1 张；未确认发送时按失败处理。
 - 显式图库浏览由 Airi 命令处理，例如 `/看看小满`。普通聊天文字仍走正常对话。
 - 手动制图素材见 [`creative-kit/`](creative-kit/)。新增图片需人工审核后再导入图库。
+
+## 各项机制的细节
+
+- [`docs/mechanisms.md`](docs/mechanisms.md)：消息链路、群聊门控、关系/记忆/学习、日程、图片、语音、审核、成本与验收。
+- [`docs/runtime-architecture.md`](docs/runtime-architecture.md)：插件职责与组件连接关系。
+- [`docs/persona.md`](docs/persona.md)：角色身份、互动风格、隐私和行为红线。
+- [`docs/plugin-lock.md`](docs/plugin-lock.md)：当前插件版本、源码是否随仓库分发及上游来源。
+- [`docs/settings.md`](docs/settings.md)：新实例需要配置的模型、平台、插件和私有凭据。
 
 ## 配置文件与安全
 

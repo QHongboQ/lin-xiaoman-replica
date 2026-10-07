@@ -15,7 +15,7 @@
 - Angel Memory：启用按用户检索的长期记忆；限制召回片段；避免写入机器人自己的消息或无关群聊内容。
 - Self Learning：启用好感度和阶段机制；管理员白名单使用自己的 UID；设置真人消息过滤和每日结算。
 - Life Scheduler：选择日程模型，设置地点锚点、工作周、时区、衣橱与人格外观锚点。
-- Airi Gallery：新建 `林小满` 分类并导入本仓库图片；设 `view_command_mode=prefix`，启用 LLM 工具（注册 `gallery_send`），并按需设置分类别名。公开参考配置见 [`configs/airi-gallery.example.json`](../configs/airi-gallery.example.json)。上传令牌及 Git 同步令牌只在管理面板填写。
+- Airi Gallery：新建 `林小满` 分类并导入本仓库图片；设 `view_command_mode=prefix`，启用 LLM 工具（注册 `gallery_send`），并按需设置分类别名。脱敏配置模板见 [`configs/runtime/astrbot_plugin_airi_gallery_config.example.json`](../configs/runtime/astrbot_plugin_airi_gallery_config.example.json)。上传令牌及 Git 同步令牌只在管理面板填写。
 - Xiaoman Personal Interface：确认已启用。管理员测试命令受 AstrBot `ADMIN` 权限保护，测试放行只对开启它的当前会话生效。
 - TTS Router：按部署选择 TTS 引擎和音色；在明确的语音请求路径启用，不要求普通文字回复自动转语音。
 - Fat Fish Wallet：填入时区、峰谷时段和日程播报目标。目标群/用户使用你自己的会话 ID。
